@@ -1,0 +1,2810 @@
+/**
+ * @license
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import React, { useState } from 'react';
+import { User, RoomRequest, ClassSchedule, ExamSchedule, ExamGrade, Equipment, BorrowRecord, RoomUsageRecord } from '../types';
+import SignaturePad from './SignaturePad';
+import { 
+  Plus, Calendar, Search, Star, Award, BookOpen, Users, Home, 
+  Wrench, Camera, HelpCircle, Eye, EyeOff, Printer, ShieldCheck, RefreshCw,
+  ChevronLeft, ChevronRight, Edit3, X
+} from 'lucide-react';
+import { alerts as Swal } from '../lib/alerts';
+import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
+import { getAppOriginForQR } from '../lib/api';
+import { TraceabilityToolsLogDoc } from './Documents';
+import AcademicDataSection from './AcademicDataSection';
+
+const TIME_OPTIONS = [
+  "07:00", "07:30", "08:00", "08:30", "09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
+  "12:00", "12:30", "13:00", "13:30", "14:00", "14:30", "15:00", "15:30", "16:00", "16:30",
+  "17:00", "17:30", "18:00", "18:30", "19:00", "19:30", "20:00", "20:30", "21:00"
+];
+
+interface ExamOfficeStudentPanelProps {
+  currentUser: User;
+  users: User[];
+  roomRequests: RoomRequest[];
+  classSchedules: ClassSchedule[];
+  examSchedules: ExamSchedule[];
+  examGrades: ExamGrade[];
+  equipments: Equipment[];
+  borrowRecords: BorrowRecord[];
+  activeTab?: 'home' | 'profile' | 'action' | 'schedule' | 'academic' | 'borrow' | 'roster' | 'requests';
+  onActiveTabChange?: (tab: 'home' | 'profile' | 'action' | 'schedule' | 'academic' | 'borrow' | 'roster' | 'requests') => void;
+  instActionTab?: 'schedule' | 'room';
+  onInstActionTabChange?: (subtab: 'schedule' | 'room') => void;
+  
+  onAddSchedule: (s: ClassSchedule) => void;
+  onAddExam: (ex: ExamSchedule) => void;
+  onAddGrade: (grade: ExamGrade) => void;
+  onBorrowEquipment: (items: { code: string; qty: number }[], purpose: string, signature: string) => void;
+  onReturnEquipment: (borrowId: string) => void;
+  onSubmitRoomRequest: (req: Omit<RoomRequest, 'id' | 'maintenanceApproved' | 'isRoomUsageRecordCreated'>) => boolean;
+  onViewRequestDoc: (req: RoomRequest) => void;
+  onViewBulkRequestDocs?: (reqs: RoomRequest[]) => void;
+  onUpdateProfile: (updated: Partial<User>) => void;
+  onAddUsageRecord?: (record: Omit<RoomUsageRecord, 'id' | 'maintenanceOfficerStatus'>) => void;
+  onCancelRoomRequest?: (requestId: string) => void;
+  onViewStudentCard: (user: User) => void;
+  welcomeBanner?: React.ReactNode;
+}
+
+const DAYS_OF_WEEK_LIST = [
+  { key: 'จันทร์', name: 'วันจันทร์', color: 'bg-yellow-50 border-yellow-200 text-yellow-800' },
+  { key: 'อังคาร', name: 'วันอังคาร', color: 'bg-pink-50 border-pink-200 text-pink-800' },
+  { key: 'พุธ', name: 'วันพุธ', color: 'bg-green-50 border-green-200 text-emerald-800' },
+  { key: 'พฤหัส', name: 'วันพฤหัสบดี', color: 'bg-orange-50 border-orange-200 text-orange-850' },
+  { key: 'ศุกร์', name: 'วันศุกร์', color: 'bg-blue-50 border-blue-200 text-blue-800' },
+  { key: 'เสาร์', name: 'วันเสาร์', color: 'bg-purple-50 border-purple-200 text-purple-800' },
+  { key: 'อาทิตย์', name: 'วันอาทิตย์', color: 'bg-red-50 border-red-200 text-red-800' },
+];
+
+const matchesDayOfWeek = (dayOfWeekStr: string, dayKey: string) => {
+  if (!dayOfWeekStr) return false;
+  const clean = dayOfWeekStr.trim().toLowerCase();
+  const keyUpper = dayKey.toLowerCase();
+  return clean === keyUpper || 
+         clean.includes(keyUpper) || 
+         (keyUpper === 'จันทร์' && clean.includes('จัน')) ||
+         (keyUpper === 'อังคาร' && clean.includes('อัง')) ||
+         (keyUpper === 'พุธ' && clean.includes('พุธ')) ||
+         (keyUpper === 'พฤหัส' && (clean.includes('พฤ') || clean.includes('พฤหัส'))) ||
+         (keyUpper === 'ศุกร์' && clean.includes('ศุก')) ||
+         (keyUpper === 'เสาร์' && clean.includes('เสา')) ||
+         (keyUpper === 'อาทิตย์' && clean.includes('อา'));
+};
+
+const THAI_MONTH_NAMES = [
+  'มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน',
+  'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'
+];
+
+const mapDayIndexToKey = (index: number) => {
+  const keys = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัส', 'ศุกร์', 'เสาร์'];
+  return keys[index];
+};
+
+export default function ExamOfficeStudentPanel({
+  currentUser,
+  users,
+  roomRequests,
+  classSchedules,
+  examSchedules,
+  examGrades,
+  equipments,
+  borrowRecords,
+  activeTab: controlledActiveTab,
+  onActiveTabChange,
+  instActionTab: controlledInstActionTab,
+  onInstActionTabChange,
+  
+  onAddSchedule,
+  onAddExam,
+  onAddGrade,
+  onBorrowEquipment,
+  onReturnEquipment,
+  onSubmitRoomRequest,
+  onViewRequestDoc,
+  onViewBulkRequestDocs,
+  onUpdateProfile,
+  onAddUsageRecord,
+  onCancelRoomRequest,
+  onViewStudentCard,
+  welcomeBanner
+}: ExamOfficeStudentPanelProps) {
+  const isStudent = currentUser.role === 'นักศึกษา';
+  const isInstructor = currentUser.role === 'Instructor';
+  const isOffice = currentUser.role === 'Office Manager' || currentUser.role === 'Office Staff';
+  const isExam = currentUser.role === 'Examination Manager' || currentUser.role === 'Examination Staff';
+
+  // Date range filters for document printing (TLTC-MO-033)
+  const [docStartDate, setDocStartDate] = useState('');
+  const [docEndDate, setDocEndDate] = useState('');
+
+  const studentBatch = currentUser.batch || (currentUser.id && String(currentUser.id).length >= 2 && !isNaN(Number(String(currentUser.id).substring(0, 2))) ? String(currentUser.id).substring(0, 2) : '67');
+
+  // Dynamically get cohorts based on existing student batches in the system
+  const availableBatches = Array.from(
+    new Set(
+      (users || [])
+        .filter((u) => u && u.role === 'นักศึกษา')
+        .map((u) => u.batch || String(u.id || '').substring(0, 2))
+        .filter((b) => b && typeof b === 'string' && b.trim().length > 0)
+    )
+  ).sort();
+  const dbBatches = availableBatches.length > 0 ? availableBatches : ['67', '68'];
+
+  const getThaiDayOfWeek = (d: Date): string => {
+    const days = ['อาทิตย์', 'จันทร์', 'อังคาร', 'พุธ', 'พฤหัส', 'ศุกร์', 'เสาร์'];
+    return days[d.getDay()];
+  };
+
+  const handleShowScheduleDetails = (cs: ClassSchedule, date: Date) => {
+    const dStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    Swal.fire({
+      title: `<span class="text-[10px] font-sans font-extrabold uppercase text-neutral-400 block tracking-widest mb-1">รายละเอียดชั่วโมงวิชาเรียน</span> <span class="font-sans font-black text-sm text-neutral-950">${cs.subjectCode}</span>`,
+      html: `
+        <div class="text-left font-sans text-xs space-y-2 py-2 mt-2 border-t border-dashed border-neutral-200">
+          <p class="font-bold text-neutral-950">ชื่อวิชาเรียน: <span class="font-medium text-neutral-700">${cs.subjectName}</span></p>
+          <p class="font-bold text-neutral-950">วันสอนหลักประจำสัปดาห์: <span class="font-medium text-neutral-700">วัน${cs.dayOfWeek}</span></p>
+          <p class="font-bold text-neutral-950 font-mono">กลุ่มเป้าหมายผู้สอน: <span class="font-medium text-neutral-700">รุ่นนักศึกษา ${cs.batch}</span></p>
+          <p class="font-bold text-neutral-950">ช่วงกำหนดจัดเรียนสอน: <span class="font-medium text-neutral-700">${cs.startDate} ถึง ${cs.endDate}</span></p>
+          <p class="font-bold text-neutral-950">อาจารย์ผู้รับผิดชอบชี้สอน: <span class="font-medium text-neutral-700">${cs.instructorName}</span></p>
+          <p class="font-bold text-neutral-950">วันที่ตรวจสอบตาราง: <span class="font-medium text-neutral-700">${dStr}</span></p>
+        </div>
+      `,
+      confirmButtonText: 'รับทราบตารางเรียน',
+      confirmButtonColor: '#171717',
+    });
+  };
+
+  const handleShowExamDetails = (ex: ExamSchedule) => {
+    Swal.fire({
+      title: `<span class="text-[10px] font-sans font-extrabold uppercase text-rose-500 block tracking-widest mb-1">กำหนดการทดสอบประเมิน</span> <span class="font-sans font-black text-sm text-rose-600">SCHEDULE EXAM</span>`,
+      html: `
+        <div class="text-left font-sans text-xs space-y-2 py-2 mt-2 border-t border-dashed border-neutral-200">
+          <p class="font-bold text-neutral-950">รายวิชาทดสอบ: <span class="font-medium text-neutral-700">${ex.subjectName}</span></p>
+          <p class="font-bold text-neutral-950">วันที่ทำการสอบสากล: <span class="font-medium text-neutral-700">${ex.date}</span></p>
+          <p class="font-bold text-neutral-950">ช่วงเวลากำหนดสอบ: <span class="font-medium text-neutral-700">${ex.time}</span></p>
+          <p class="font-bold text-neutral-950 font-mono">กลุ่มเป้าหมายผู้สอบ: <span class="font-medium text-neutral-700">รุ่นนักศึกษา ${ex.batch}</span></p>
+        </div>
+      `,
+      confirmButtonText: 'เตรียมสิทธิ์ความพร้อมสอบ',
+      confirmButtonColor: '#E11D48',
+    });
+  };
+
+  // State Tabs
+  const [localActiveTab, setLocalActiveTab] = useState<'home' | 'profile' | 'action' | 'schedule' | 'academic' | 'borrow' | 'roster' | 'requests'>('home');
+  const activeTab = controlledActiveTab !== undefined ? controlledActiveTab : localActiveTab;
+  const setActiveTab = (tab: 'home' | 'profile' | 'action' | 'schedule' | 'academic' | 'borrow' | 'roster' | 'requests') => {
+    if (onActiveTabChange) onActiveTabChange(tab);
+    setLocalActiveTab(tab);
+  };
+
+  // Instructor Action Tab Switcher (Schedule management vs Lab requests)
+  const [localInstActionTab, setLocalInstActionTab] = useState<'schedule' | 'room'>('schedule');
+  const instActionTab = controlledInstActionTab !== undefined ? controlledInstActionTab : localInstActionTab;
+  const setInstActionTab = (subtab: 'schedule' | 'room') => {
+    if (onInstActionTabChange) onInstActionTabChange(subtab);
+    setLocalInstActionTab(subtab);
+  };
+
+  // Monthly calendar states
+  const [calendarViewMode, setCalendarViewMode] = useState<'weekly' | 'monthly'>('monthly');
+  const [currentCalendarDate, setCurrentCalendarDate] = useState(new Date(2026, 5, 12)); // June 12, 2026
+  const [selectedCalendarDay, setSelectedCalendarDay] = useState<Date | null>(new Date(2026, 5, 12));
+
+  const handlePrevMonth = () => {
+    setCurrentCalendarDate(new Date(currentCalendarDate.getFullYear(), currentCalendarDate.getMonth() - 1, 1));
+  };
+
+  const handleNextMonth = () => {
+    setCurrentCalendarDate(new Date(currentCalendarDate.getFullYear(), currentCalendarDate.getMonth() + 1, 1));
+  };
+
+  // Office schedule states
+  const [schBatch, setSchBatch] = useState(() => dbBatches[0] || '');
+  const [schCode, setSchCode] = useState('');
+  const [schName, setSchName] = useState('');
+  const [schDays, setSchDays] = useState<('จันทร์' | 'อังคาร' | 'พุธ' | 'พฤหัส' | 'ศุกร์' | 'เสาร์' | 'อาทิตย์')[]>(['จันทร์']);
+  const [schStart, setSchStart] = useState('');
+  const [schEnd, setSchEnd] = useState('');
+  const [schTeacher, setSchTeacher] = useState('');
+
+  // Auto-populate instructor name for teaching schedules if they are the instructor
+  React.useEffect(() => {
+    if (isInstructor && !schTeacher && currentUser) {
+      setSchTeacher(`${currentUser.firstName} ${currentUser.lastName}`);
+    }
+  }, [isInstructor, currentUser, schTeacher]);
+
+  // Exam states
+  const [exBatch, setExBatch] = useState(() => dbBatches[0] || '');
+  const [exDate, setExDate] = useState('');
+  const [exTime, setExTime] = useState('09:00 - 11:30');
+  const [exSubject, setExSubject] = useState('');
+
+  // Grading states
+  const [gradeBatch, setGradeBatch] = useState(() => dbBatches[0] || '');
+  const [gradeSubject, setGradeSubject] = useState('');
+  const [gradeRound, setGradeRound] = useState(1);
+  const [studentGrades, setStudentGrades] = useState<{ [id: string]: number }>({});
+
+  // Synchronise exam subject with class schedules when batch changes
+  React.useEffect(() => {
+    const activeExSubjects = Array.from(
+      new Set(
+        classSchedules
+          .filter((s) => s.batch === exBatch)
+          .map((s) => `${s.subjectCode} ${s.subjectName}`)
+      )
+    );
+    if (activeExSubjects.length > 0) {
+      if (!activeExSubjects.includes(exSubject)) {
+        setExSubject(activeExSubjects[0]);
+      }
+    } else {
+      setExSubject('');
+    }
+  }, [exBatch, classSchedules, exSubject]);
+
+  // Synchronise grading subject with class schedules when batch changes
+  React.useEffect(() => {
+    const activeGradeSubjects = Array.from(
+      new Set(
+        classSchedules
+          .filter((s) => s.batch === gradeBatch)
+          .map((s) => `${s.subjectCode} ${s.subjectName}`)
+      )
+    );
+    if (activeGradeSubjects.length > 0) {
+      if (!activeGradeSubjects.includes(gradeSubject)) {
+        setGradeSubject(activeGradeSubjects[0]);
+      }
+    } else {
+      setGradeSubject('');
+    }
+  }, [gradeBatch, classSchedules, gradeSubject]);
+
+  // Room Request form states
+  const [department, setDepartment] = useState('');
+  const [phone, setPhone] = useState('');
+  const [purpose, setPurpose] = useState('');
+  const [requestDate, setRequestDate] = useState('');
+  const [startTime, setStartTime] = useState('09:00');
+  const [endTime, setEndTime] = useState('12:00');
+  const [selectedRoom, setSelectedRoom] = useState('Practical Area in Hangar');
+  const [otherRoomText, setOtherRoomText] = useState('');
+  const [requestSignature, setRequestSignature] = useState('');
+
+  // Room Usage Record form states
+  const [roomSubForm, setRoomSubForm] = useState<'request' | 'usage'>('request');
+  const [usageDate, setUsageDate] = useState(new Date().toISOString().split('T')[0]);
+  const [usageRoomName, setUsageRoomName] = useState('');
+  const [usageReportText, setUsageReportText] = useState('');
+  const [usageSignature, setUsageSignature] = useState('');
+
+  // Equipment borrowing states
+  const [targetCode, setTargetCode] = useState('');
+  const [borrowQty, setBorrowQty] = useState(1);
+  const [borrowSignature, setBorrowSignature] = useState('');
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [scannedTool, setScannedTool] = useState<Equipment | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [showTraceabilityDoc, setShowTraceabilityDoc] = useState(false);
+  const [borrowCart, setBorrowCart] = useState<{ code: string; qty: number; toolName: string }[]>([]);
+  const [borrowPurpose, setBorrowPurpose] = useState('');
+
+  React.useEffect(() => {
+    let html5QrCode: Html5Qrcode | null = null;
+    let isMounted = true;
+
+    if (isCameraActive) {
+      setCameraError(null);
+      
+      const startScanner = async () => {
+        // Wait briefly for React to render the scanner container div
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        if (!isMounted) return;
+
+        try {
+          const container = document.getElementById('student-equipment-reader');
+          if (!container) {
+            throw new Error('ระบบไม่พบตำแหน่งแผงแสดงผลกล้องตรวจจับ');
+          }
+          
+          html5QrCode = new Html5Qrcode('student-equipment-reader');
+          await html5QrCode.start(
+            { facingMode: 'environment' },
+            {
+              fps: 15,
+              qrbox: (w, h) => {
+                const size = Math.max(120, Math.min(w, h, 250));
+                return { width: size, height: Math.max(size * 0.5, 90) }; // wider scan box for barcodes and QR codes
+              }
+            },
+            (decodedText) => {
+              // On scanned successfully:
+              handleSimulateScan(decodedText);
+            },
+            () => {
+              // Verbose error frames, safe to bypass
+            }
+          );
+        } catch (err: any) {
+          console.error('Error starting Html5Qrcode engine:', err);
+          setCameraError(err.message || 'ไม่สามารถเข้าถึงอุปกรณ์กล้องได้ โปรดเปิดสิทธิ์อนุมัติการใช้งานกล้องในเบราว์เซอร์');
+        }
+      };
+
+      startScanner();
+    }
+
+    return () => {
+      isMounted = false;
+      if (html5QrCode) {
+        try {
+          if (html5QrCode.isScanning) {
+            html5QrCode.stop().catch((stopErr) => {
+              console.error('Error stopping scanner during cleanup:', stopErr);
+            });
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+    };
+  }, [isCameraActive]);
+
+  // Search schedule (for examinations checking)
+  const [searchStudentId, setSearchStudentId] = useState('');
+  const [checkedStudent, setCheckedStudent] = useState<User | null>(null);
+
+  // Filter batch roster
+  const [rosterBatch, setRosterBatch] = useState(() => dbBatches[0] || '');
+
+  // Filter batch schedule
+  const [scheduleBatch, setScheduleBatch] = useState(studentBatch || dbBatches[0] || '');
+
+  // Automatically adjust selected batch states once options load/change
+  React.useEffect(() => {
+    if (dbBatches.length > 0) {
+      if (!dbBatches.includes(schBatch) || !schBatch) setSchBatch(dbBatches[0]);
+      if (!dbBatches.includes(exBatch) || !exBatch) setExBatch(dbBatches[0]);
+      if (!dbBatches.includes(gradeBatch) || !gradeBatch) setGradeBatch(dbBatches[0]);
+      if (!dbBatches.includes(rosterBatch) || !rosterBatch) setRosterBatch(dbBatches[0]);
+      if (!dbBatches.includes(scheduleBatch) || !scheduleBatch) setScheduleBatch(dbBatches[0]);
+    }
+  }, [dbBatches, schBatch, exBatch, gradeBatch, rosterBatch, scheduleBatch]);
+
+  // Profile Edit states
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [tableDate, setTableDate] = useState(new Date().toISOString().split('T')[0]);
+  const [editTitle, setEditTitle] = useState(currentUser.title || '');
+  const [editFirstNameTh, setEditFirstNameTh] = useState(currentUser.firstNameTh || '');
+  const [editLastNameTh, setEditLastNameTh] = useState(currentUser.lastNameTh || '');
+  const [editEmail, setEditEmail] = useState(currentUser.email);
+  const [editPassword, setEditPassword] = useState(currentUser.password || '');
+  const [showEditPassword, setShowEditPassword] = useState(false);
+  const [editPhoto, setEditPhoto] = useState(currentUser.photoUrl);
+  const [editSig, setEditSig] = useState(currentUser.signature);
+
+  const handleCancelEditProfile = () => {
+    setEditTitle(currentUser.title || '');
+    setEditFirstNameTh(currentUser.firstNameTh || '');
+    setEditLastNameTh(currentUser.lastNameTh || '');
+    setEditEmail(currentUser.email);
+    setEditPassword(currentUser.password || '');
+    setEditPhoto(currentUser.photoUrl);
+    setEditSig(currentUser.signature);
+    setIsEditingProfile(false);
+  };
+
+  const handleUpdateProfileSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editFirstNameTh.trim() || !editLastNameTh.trim() || !editEmail.trim()) {
+      Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณากรอกข้อมูลชื่อ-นามสกุลไทย และอีเมลให้ครบถ้วน', confirmButtonColor: '#171717' });
+      return;
+    }
+
+    if (editFirstNameTh.trim() || editLastNameTh.trim()) {
+      const thaiRegex = /^[ก-๙\s.-]+$/;
+      if (editFirstNameTh.trim() && !thaiRegex.test(editFirstNameTh.trim())) {
+        Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณากรอกชื่อจริงเป็นภาษาไทยเท่านั้น', confirmButtonColor: '#171717' });
+        return;
+      }
+      if (editLastNameTh.trim() && !thaiRegex.test(editLastNameTh.trim())) {
+        Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณากรอกนามสกุลเป็นภาษาไทยเท่านั้น', confirmButtonColor: '#171717' });
+        return;
+      }
+    }
+
+    onUpdateProfile({
+      title: editTitle.trim(),
+      firstNameTh: editFirstNameTh.trim(),
+      lastNameTh: editLastNameTh.trim(),
+      email: editEmail,
+      password: editPassword,
+      photoUrl: editPhoto,
+      signature: editSig
+    });
+    setIsEditingProfile(false);
+    Swal.fire({ icon: 'success', title: 'สำเร็จ', text: 'แก้ไขข้อมูลของฉันเรียบร้อยแล้ว', confirmButtonColor: '#171717' });
+  };
+
+  const checkRoomBusy = (roomName: string): boolean => {
+    if (!requestDate || !startTime || !endTime) return false;
+    if (startTime >= endTime) return false;
+
+    const normalizeDateStr = (dateStr: string): string => {
+      if (!dateStr) return '';
+      const trimmed = dateStr.trim();
+      let year = NaN;
+      let month = NaN;
+      let day = NaN;
+
+      if (trimmed.includes('-')) {
+        const parts = trimmed.split('-');
+        if (parts.length === 3) {
+          if (parts[0].length === 4) {
+            year = parseInt(parts[0], 10);
+            month = parseInt(parts[1], 10);
+            day = parseInt(parts[2], 10);
+          } else {
+            year = parseInt(parts[2], 10);
+            month = parseInt(parts[1], 10);
+            day = parseInt(parts[0], 10);
+          }
+        }
+      } else if (trimmed.includes('/')) {
+        const parts = trimmed.split('/');
+        if (parts.length === 3) {
+          if (parts[2].length === 4) {
+            year = parseInt(parts[2], 10);
+            month = parseInt(parts[1], 10);
+            day = parseInt(parts[0], 10);
+          } else if (parts[0].length === 4) {
+            year = parseInt(parts[0], 10);
+            month = parseInt(parts[1], 10);
+            day = parseInt(parts[2], 10);
+          }
+        }
+      }
+
+      if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+        if (year > 2400) year -= 543;
+        return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      }
+      return trimmed;
+    };
+
+    const parseTimeRangeStr = (timeRangeStr: string) => {
+      const parts = timeRangeStr.split('-');
+      if (parts.length === 2) {
+        return {
+          startTime: parts[0].trim(),
+          endTime: parts[1].trim(),
+        };
+      }
+      return { startTime: '', endTime: '' };
+    };
+
+    const targetNormDate = normalizeDateStr(requestDate);
+
+    return roomRequests.some(existing => {
+      if (existing.maintenanceApproved === 'Rejected') return false;
+      if (existing.room.trim().toLowerCase() !== roomName.trim().toLowerCase()) return false;
+      if (normalizeDateStr(existing.date) !== targetNormDate) return false;
+
+      const existTimes = parseTimeRangeStr(existing.timeRange);
+      if (!existTimes.startTime || !existTimes.endTime) return false;
+
+      return existTimes.startTime < endTime && startTime < existTimes.endTime;
+    });
+  };
+
+  const handleRoomSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!department || !phone || !purpose || !requestDate) {
+      Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณากรอกข้อมูลให้ครบถ้วน', confirmButtonColor: '#171717' });
+      return;
+    }
+    if (!requestSignature) {
+      Swal.fire({ icon: 'error', title: 'ต้องการลายเซ็น', text: 'กรุณาเซ็นชื่อลายมือบนบอร์ด', confirmButtonColor: '#171717' });
+      return;
+    }
+
+    // Validate that startTime < endTime before submitting
+    if (startTime >= endTime) {
+      Swal.fire({
+        icon: 'error',
+        title: 'ช่วงเวลาไม่ถูกต้อง',
+        text: 'เวลาเริ่มต้นต้องอยู่ก่อนเวลาสิ้นสุด',
+        confirmButtonColor: '#171717'
+      });
+      return;
+    }
+
+    const finalRoom = selectedRoom === 'Other' ? otherRoomText : selectedRoom;
+    if (checkRoomBusy(finalRoom)) {
+      Swal.fire({
+        icon: 'error',
+        title: 'ห้องไม่ว่าง',
+        text: 'ห้องนี้ถูกจองใช้ในช่วงเวลาที่ท่านเลือกแล้ว กรุณาเลือกเวลาอื่นหรือเปลี่ยนห้อง',
+        confirmButtonColor: '#171717'
+      });
+      return;
+    }
+
+    const success = onSubmitRoomRequest({
+      date: requestDate,
+      timeRange: `${startTime} - ${endTime}`,
+      room: finalRoom,
+      requesterId: currentUser.id,
+      requesterName: currentUser.firstNameTh && currentUser.lastNameTh 
+        ? `${currentUser.title || ''}${currentUser.firstNameTh} ${currentUser.lastNameTh}`.trim()
+        : `${currentUser.title ? currentUser.title + ' ' : ''}${currentUser.firstName} ${currentUser.lastName}`.trim(),
+      requesterRole: currentUser.role,
+      department,
+      phone,
+      purpose,
+      signature: requestSignature,
+    });
+
+    if (success) {
+      setPurpose('');
+      setDepartment('');
+      setPhone('');
+      setRequestSignature('');
+      Swal.fire({ icon: 'success', title: 'จองเรียบร้อย', text: 'ส่งใบคำขอกุญแจห้องแล้วรอฝ่ายข่างอนุมัติ', confirmButtonColor: '#171717' });
+    }
+  };
+
+  const handleUsageRecordSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!usageDate || !usageRoomName || !usageReportText) {
+      Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณากรอกข้อมูลให้ครบถ้วน', confirmButtonColor: '#171717' });
+      return;
+    }
+    if (!usageSignature) {
+      Swal.fire({ icon: 'error', title: 'ต้องการลายเซ็น', text: 'ผู้เข้าใช้ห้องต้องลงลายเซ็นรับรองความรับผิดชอบ', confirmButtonColor: '#171717' });
+      return;
+    }
+    if (onAddUsageRecord) {
+      onAddUsageRecord({
+        date: usageDate,
+        room: usageRoomName,
+        requesterName: currentUser.firstNameTh && currentUser.lastNameTh 
+          ? `${currentUser.title || ''}${currentUser.firstNameTh} ${currentUser.lastNameTh}`.trim()
+          : `${currentUser.title ? currentUser.title + ' ' : ''}${currentUser.firstName} ${currentUser.lastName}`.trim(),
+        report: usageReportText,
+        remarks: 'บันทึกเข้าใช้งานห้องปฏิบัติการ (ไม่ต้องขอจอง)',
+        requesterSignature: usageSignature,
+      });
+      setUsageRoomName('');
+      setUsageReportText('');
+      setUsageSignature('');
+      Swal.fire({ icon: 'success', title: 'บันทึกสำเร็จ', text: 'บันทึกประวัติการใช้งานห้องปฏิบัติการ (TLTC-MO-034) เรียบร้อย', confirmButtonColor: '#10b981' });
+    }
+  };
+
+  const handleCreateSchedule = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!schCode || !schName || !schStart || !schEnd || !schTeacher) {
+      Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณากรอกข้อมูลหลักสูตรที่เปิดสอนครบถ้วน', confirmButtonColor: '#171717' });
+      return;
+    }
+
+    if (schDays.length === 0) {
+      Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณาเลือกวันที่มีเรียนอย่างน้อย 1 วัน', confirmButtonColor: '#171717' });
+      return;
+    }
+
+    schDays.forEach((day, index) => {
+      onAddSchedule({
+        id: `SCH-${Date.now()}-${index}`,
+        batch: schBatch,
+        subjectCode: schCode,
+        subjectName: schName,
+        dayOfWeek: day,
+        startDate: schStart,
+        endDate: schEnd,
+        instructorName: schTeacher,
+      });
+    });
+
+    setSchCode('');
+    setSchName('');
+    setSchTeacher('');
+    Swal.fire({ icon: 'success', title: 'เปิดวิชาสอนสำเร็จ', text: 'ตารางเรียนได้รับการบันทึกลงปฏิทินเรียบร้อย', confirmButtonColor: '#171717' });
+  };
+
+  const handleScheduleExam = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!exDate || !exSubject) {
+      Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณากรอกข้อมูลสอบให้ครบถ้วน', confirmButtonColor: '#171717' });
+      return;
+    }
+
+    onAddExam({
+      id: `EXM-${Date.now()}`,
+      batch: exBatch,
+      date: exDate,
+      time: exTime,
+      subjectName: exSubject,
+    });
+
+    const activeExSubjects = Array.from(
+      new Set(
+        classSchedules
+          .filter((s) => s.batch === exBatch)
+          .map((s) => `${s.subjectCode} ${s.subjectName}`)
+      )
+    );
+    setExSubject(activeExSubjects.length > 0 ? activeExSubjects[0] : '');
+    Swal.fire({ icon: 'success', title: 'นัดหมายสอบสำเร็จ', text: 'เพิ่มวิชาสอบเข้านัดหมายแล้ว', confirmButtonColor: '#171717' });
+  };
+
+  const handlePublishGrades = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gradeSubject) {
+      Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'กรุณากรอกวิชาเพื่อรายงานเกรด', confirmButtonColor: '#171717' });
+      return;
+    }
+
+    const studentRoster = users.filter(u => {
+      if (u.role !== 'นักศึกษา') return false;
+      const stdBatch = String(u.id || '').substring(0, 2);
+      return stdBatch === gradeBatch;
+    });
+    const parsedGrades = studentRoster.map(std => ({
+      studentId: std.id,
+      studentName: `${std.firstName} ${std.lastName}`,
+      score: studentGrades[std.id] || 0,
+    }));
+
+    onAddGrade({
+      id: `GR-${Date.now()}`,
+      batch: gradeBatch,
+      subjectName: gradeSubject,
+      round: gradeRound,
+      grades: parsedGrades,
+    });
+
+    const activeGradeSubjects = Array.from(
+      new Set(
+        classSchedules
+          .filter((s) => s.batch === gradeBatch)
+          .map((s) => `${s.subjectCode} ${s.subjectName}`)
+      )
+    );
+    setGradeSubject(activeGradeSubjects.length > 0 ? activeGradeSubjects[0] : '');
+    setStudentGrades({});
+    Swal.fire({ icon: 'success', title: 'ประกาศผลสอบแล้ว', text: 'คะแนนถูกส่งเข้าสู่ตารางคะแนนนักศึกษา', confirmButtonColor: '#171717' });
+  };
+
+  // Simulate scanning of QR code
+  const handleSimulateScan = (codeToScan: string) => {
+    const match = equipments.find(eq => eq.code.toLowerCase() === codeToScan.toLowerCase().trim());
+    if (match) {
+      setScannedTool(match);
+      setTargetCode(match.code);
+      setIsCameraActive(false);
+      Swal.fire({ icon: 'success', title: 'พบอุปกรณ์ช่าง', text: `อุปกรณ์: ${match.toolName} (คงเหลือ: ${match.qty} EA)`, confirmButtonColor: '#171717' });
+    } else {
+      Swal.fire({ icon: 'error', title: 'ไม่พบรหัสอุปกรณ์', text: 'คิวอาร์โค้ดนี้ไม่ได้ถูกจดจำในโรงซ่อมบำรุง', confirmButtonColor: '#171717' });
+    }
+  };
+
+  const handleAddToBorrowCart = () => {
+    if (!targetCode) {
+      Swal.fire({ icon: 'error', title: 'ระบุรหัสคิวอาร์โค้ด', text: 'โปรดสแกนป้ายคิวอาร์โค้ดหรือป้อนรหัสอุปกรณ์ก่อน', confirmButtonColor: '#171717' });
+      return;
+    }
+    const match = equipments.find(eq => eq.code.toUpperCase() === targetCode.toUpperCase().trim());
+    if (!match) {
+      Swal.fire({ icon: 'error', title: 'ไม่พบอุปกรณ์', text: 'ไม่พบเครื่องมือชิ้นนี้ในรายการ', confirmButtonColor: '#171717' });
+      return;
+    }
+    if (match.qty === 0 || match.status === 'NotReady' || match.status === 'Damaged' || match.status === 'Calibrating') {
+      Swal.fire({
+        icon: 'error',
+        title: 'เครื่องมือไม่พร้อมใช้งาน',
+        text: 'อุปกรณ์ชิ้นนี้ไม่อยู่ในสถานะพร้อมให้ยืมบริการขณะนี้ (เนื่องจากชำรุด สอบเทียบ หรือหมดคลัง)',
+        confirmButtonColor: '#171717'
+      });
+      return;
+    }
+
+    const totalBorrowed = borrowRecords
+      .filter(r => r.equipmentCode === match.code && r.status !== 'Returned')
+      .reduce((sum, r) => sum + r.qty, 0);
+    
+    const cartQty = borrowCart.filter(item => item.code === match.code).reduce((sum, item) => sum + item.qty, 0);
+    const available = match.qty - totalBorrowed - cartQty;
+
+    if (available < borrowQty) {
+      Swal.fire({ 
+        icon: 'warning', 
+        title: 'ของไม่พอ', 
+        text: `จำนวนอุปกรณ์ในคลังคงเหลือพร้อมยืม ${available} EA`, 
+        confirmButtonColor: '#171717' 
+      });
+      return;
+    }
+
+    const existingCartItemIdx = borrowCart.findIndex(item => item.code === match.code);
+    if (existingCartItemIdx > -1) {
+      const updatedCart = [...borrowCart];
+      updatedCart[existingCartItemIdx].qty += borrowQty;
+      setBorrowCart(updatedCart);
+    } else {
+      setBorrowCart([...borrowCart, { code: match.code, qty: borrowQty, toolName: match.toolName }]);
+    }
+
+    setTargetCode('');
+    setBorrowQty(1);
+    setScannedTool(null);
+    Swal.fire({ 
+      toast: true,
+      position: 'top-end',
+      icon: 'success', 
+      title: `เพิ่ม ${match.toolName} เข้าในคาร์ทแล้ว`, 
+      showConfirmButton: false,
+      timer: 1500
+    });
+  };
+
+  const handleRemoveFromBorrowCart = (index: number) => {
+    const updated = [...borrowCart];
+    updated.splice(index, 1);
+    setBorrowCart(updated);
+  };
+
+  const handleBorrowSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (borrowCart.length === 0) {
+      Swal.fire({ icon: 'error', title: 'ไม่มีรายการยืม', text: 'กรุณาเพิ่มอุปกรณ์อย่างน้อย 1 รายการเข้าสู่ตารางยืมก่อน', confirmButtonColor: '#171717' });
+      return;
+    }
+    if (!borrowPurpose.trim()) {
+      Swal.fire({ icon: 'error', title: 'ระบุวัตถุประสงค์', text: 'กรุณากรอกวัตถุประสงค์การยืม เช่น JOB Card No.', confirmButtonColor: '#171717' });
+      return;
+    }
+    if (!borrowSignature) {
+      Swal.fire({ icon: 'error', title: 'โปรดลงนามและเซ็นลายเซ็น', text: 'จำเป็นต้องวาดลายมือชื่ออิเล็กทรอนิกส์ด้านล่างก่อนยืมอุปกรณ์', confirmButtonColor: '#171717' });
+      return;
+    }
+
+    onBorrowEquipment(borrowCart.map(item => ({ code: item.code, qty: item.qty })), borrowPurpose.trim(), borrowSignature);
+    setBorrowCart([]);
+    setBorrowPurpose('');
+    setBorrowSignature('');
+    Swal.fire({ icon: 'success', title: 'เบิกจ่ายเครื่องมือสำเร็จ', text: 'บันทึกประวัติการยืมเครื่องมือพร้อมอุปกรณ์ทั้งหมดเรียบร้อยแล้ว', confirmButtonColor: '#171717' });
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 text-slate-850 font-sans text-xs">
+      
+      {/* Mobile/Tablet Horizontal Sub-navigation tabs */}
+      <div className="hidden bg-white hover:bg-slate-50/50 p-1 rounded-xl border border-slate-200 shadow-sm gap-1 overflow-x-auto shrink-0 no-print">
+        {/* OFFICE MANAGER / STAFF ROLE */}
+        {isOffice && (
+          <>
+            <button
+              onClick={() => setActiveTab('home')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'home' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              หน้าแรก
+            </button>
+            <button
+              onClick={() => { setActiveTab('action'); setInstActionTab('schedule'); }}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'action' && instActionTab === 'schedule' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              จัดตารางเรียน
+            </button>
+            <button
+              onClick={() => { setActiveTab('action'); setInstActionTab('schedule'); }}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'action' && instActionTab === 'schedule' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              จัดตารางสอน
+            </button>
+            <button
+              onClick={() => { setActiveTab('action'); setInstActionTab('room'); }}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'action' && instActionTab === 'room' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              ขอใช้ห้อง/บันทึกการใช้ห้อง
+            </button>
+            <button
+              onClick={() => setActiveTab('requests')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'requests' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              เอกสารคำขอของฉัน
+            </button>
+          </>
+        )}
+
+        {/* EXAMINATION MANAGER / STAFF ROLE */}
+        {isExam && (
+          <>
+            <button
+              onClick={() => setActiveTab('home')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'home' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              หน้าแรก
+            </button>
+            <button
+              onClick={() => setActiveTab('academic')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'academic' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              ดูตารางเรียนนักศึกษา
+            </button>
+            <button
+              onClick={() => { setActiveTab('action'); }}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'action' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              นัดสอบ
+            </button>
+            <button
+              onClick={() => { setActiveTab('action'); }}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'action' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              บันทึกคะแนนสอบ
+            </button>
+            <button
+              onClick={() => { setActiveTab('action'); setInstActionTab('room'); }}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'action' && instActionTab === 'room' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              ขอใช้ห้อง/บันทึกการใช้ห้อง
+            </button>
+            <button
+              onClick={() => setActiveTab('requests')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'requests' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              เอกสารคำขอของฉัน
+            </button>
+          </>
+        )}
+
+        {/* STUDENT ROLE */}
+        {isStudent && (
+          <>
+            <button
+              onClick={() => setActiveTab('home')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'home' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              หน้าแรกแสดงข้อมูล
+            </button>
+            <button
+              onClick={() => setActiveTab('borrow')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'borrow' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              เบิกอุปกรณ์
+            </button>
+            <button
+              onClick={() => setActiveTab('borrow')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'borrow' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              คืนอุปกรณ์
+            </button>
+            <button
+              onClick={() => setActiveTab('roster')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'roster' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              ข้อมูลเพื่อนร่วมรุ่น
+            </button>
+            <button
+              onClick={() => setActiveTab('action')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'action' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              ขอใช้ห้อง/บันทึกการใช้ห้อง
+            </button>
+            <button
+              onClick={() => setActiveTab('requests')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'requests' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              เอกสารคำขอของฉัน
+            </button>
+          </>
+        )}
+
+        {/* INSTRUCTOR ROLE */}
+        {isInstructor && (
+          <>
+            <button
+              onClick={() => setActiveTab('home')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'home' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              หน้าแรก
+            </button>
+            <button
+              onClick={() => setActiveTab('borrow')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'borrow' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              เบิกอุปกรณ์
+            </button>
+            <button
+              onClick={() => setActiveTab('borrow')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'borrow' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              คืนอุปกรณ์
+            </button>
+            <button
+              onClick={() => setActiveTab('roster')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'roster' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              ข้อมูลบุคลากร
+            </button>
+            <button
+              onClick={() => { setActiveTab('action'); setInstActionTab('room'); }}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'action' && instActionTab === 'room' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              ขอใช้ห้อง/บันทึกการใช้ห้อง
+            </button>
+            <button
+              onClick={() => setActiveTab('requests')}
+              className={`px-4 py-2 rounded-lg font-sans font-bold text-center text-xs transition-all cursor-pointer whitespace-nowrap ${
+                activeTab === 'requests' ? 'bg-[#0F172A] text-white shadow-xs' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+              }`}
+            >
+              เอกสารคำขอของฉัน
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Sidebar Navigation */}
+      <div className="hidden lg:flex lg:col-span-1 bg-white border border-slate-200 p-4 rounded-xl shadow-sm flex-col gap-1.5">
+        <h4 className="font-sans font-extrabold text-[10px] uppercase text-slate-400 mb-2 tracking-widest border-b border-slate-100 pb-1.5 font-bold">
+          ระบบสารสนเทศสำหรับการช่าง
+        </h4>
+
+        {/* OFFICE MANAGER / STAFF ROLE */}
+        {isOffice && (
+          <>
+            <button
+              id="seoHomeSidebarBtn"
+              onClick={() => setActiveTab('home')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'home' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Home size={14} />
+              <span>หน้าแรก</span>
+            </button>
+            <button
+              id="seoScheduleBtnClass"
+              onClick={() => {
+                setActiveTab('action');
+                setInstActionTab('schedule');
+              }}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'action' && instActionTab === 'schedule' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Calendar size={14} />
+              <span>จัดตารางเรียน</span>
+            </button>
+            <button
+              id="seoScheduleBtnTeach"
+              onClick={() => {
+                setActiveTab('action');
+                setInstActionTab('schedule');
+              }}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'action' && instActionTab === 'schedule' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Calendar size={14} />
+              <span>จัดตารางสอน</span>
+            </button>
+            <button
+              id="seoRoomRequestSidebarBtn"
+              onClick={() => {
+                setActiveTab('action');
+                setInstActionTab('room');
+              }}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'action' && instActionTab === 'room' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Calendar size={14} />
+              <span>ขอใช้ห้อง/บันทึกการใช้ห้อง</span>
+            </button>
+            <button
+              id="seoRequestsBtn"
+              onClick={() => setActiveTab('requests')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'requests' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <BookOpen size={14} />
+              <span>เอกสารคำขอของฉัน</span>
+            </button>
+          </>
+        )}
+
+        {/* EXAMINATION MANAGER / STAFF ROLE */}
+        {isExam && (
+          <>
+            <button
+              id="seoHomeSidebarBtn"
+              onClick={() => setActiveTab('home')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'home' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Home size={14} />
+              <span>หน้าแรก</span>
+            </button>
+            <button
+              id="seoAcademicBtn"
+              onClick={() => setActiveTab('academic')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'academic' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Award size={14} />
+              <span>ดูตารางเรียนนักศึกษา</span>
+            </button>
+            <button
+              id="seoExamScheduleBtn"
+              onClick={() => setActiveTab('action')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'action' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Calendar size={14} />
+              <span>นัดสอบ</span>
+            </button>
+            <button
+              id="seoExamGradeBtn"
+              onClick={() => setActiveTab('action')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'action' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Award size={14} />
+              <span>บันทึกคะแนนสอบ</span>
+            </button>
+            <button
+              id="seoRoomRequestSidebarBtn"
+              onClick={() => {
+                setActiveTab('action');
+                setInstActionTab('room');
+              }}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'action' && instActionTab === 'room' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Calendar size={14} />
+              <span>ขอใช้ห้อง/บันทึกการใช้ห้อง</span>
+            </button>
+            <button
+              id="seoRequestsBtn"
+              onClick={() => setActiveTab('requests')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'requests' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <BookOpen size={14} />
+              <span>เอกสารคำขอของฉัน</span>
+            </button>
+          </>
+        )}
+
+        {/* STUDENT ROLE */}
+        {isStudent && (
+          <>
+            <button
+              id="seoHomeSidebarBtn"
+              onClick={() => setActiveTab('home')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'home' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Home size={14} />
+              <span>หน้าแรกแสดงข้อมูล</span>
+            </button>
+            <button
+              id="seoBorrowBtn"
+              onClick={() => setActiveTab('borrow')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'borrow' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Wrench size={14} />
+              <span>เบิกอุปกรณ์</span>
+            </button>
+            <button
+              id="seoReturnBtn"
+              onClick={() => setActiveTab('borrow')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'borrow' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Wrench size={14} />
+              <span>คืนอุปกรณ์</span>
+            </button>
+            <button
+              id="seoRosterBtn"
+              onClick={() => setActiveTab('roster')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'roster' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Users size={14} />
+              <span>ข้อมูลเพื่อนร่วมรุ่น</span>
+            </button>
+            <button
+              id="seoRoomRequestSidebarBtn"
+              onClick={() => setActiveTab('action')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'action' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Calendar size={14} />
+              <span>ขอใช้ห้อง/บันทึกการใช้ห้อง</span>
+            </button>
+            <button
+              id="seoRequestsBtn"
+              onClick={() => setActiveTab('requests')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'requests' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <BookOpen size={14} />
+              <span>เอกสารคำขอของฉัน</span>
+            </button>
+          </>
+        )}
+
+        {/* INSTRUCTOR ROLE */}
+        {isInstructor && (
+          <>
+            <button
+              id="seoHomeSidebarBtn"
+              onClick={() => setActiveTab('home')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'home' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Home size={14} />
+              <span>หน้าแรก</span>
+            </button>
+            <button
+              id="seoBorrowBtn"
+              onClick={() => setActiveTab('borrow')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'borrow' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Wrench size={14} />
+              <span>เบิกอุปกรณ์</span>
+            </button>
+            <button
+              id="seoReturnBtn"
+              onClick={() => setActiveTab('borrow')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'borrow' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Wrench size={14} />
+              <span>คืนอุปกรณ์</span>
+            </button>
+            <button
+              id="seoRosterBtn"
+              onClick={() => setActiveTab('roster')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'roster' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Users size={14} />
+              <span>ข้อมูลบุคลากร</span>
+            </button>
+            <button
+              id="seoRoomRequestSidebarBtn"
+              onClick={() => {
+                setActiveTab('action');
+                setInstActionTab('room');
+              }}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'action' && instActionTab === 'room' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <Calendar size={14} />
+              <span>ขอใช้ห้อง/บันทึกการใช้ห้อง</span>
+            </button>
+            <button
+              id="seoRequestsBtn"
+              onClick={() => setActiveTab('requests')}
+              className={`w-full py-2 px-3 text-left rounded-lg font-sans font-bold transition-all cursor-pointer flex items-center gap-2 ${
+                activeTab === 'requests' ? 'bg-[#0F172A] text-white shadow-xs' : 'hover:bg-slate-50 text-slate-650 hover:text-slate-900'
+              }`}
+            >
+              <BookOpen size={14} />
+              <span>เอกสารคำขอของฉัน</span>
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Main Content Area */}
+      <div className="lg:col-span-3 space-y-6">
+        {welcomeBanner}
+        <div className="bg-white border border-slate-200 p-6 rounded-xl shadow-sm min-h-[400px]">
+        
+        {/* TAB 1: USER INFO / STUDENT REVIEWS */}
+        {activeTab === 'profile' && (
+          <div className="space-y-6 animate-fade-in">
+            <h3 className="font-sans font-extrabold text-sm border-b pb-2 flex items-center justify-between">
+              <span>ประวัติข้อมูลส่วนตัวและผลการจองของฉัน ({currentUser.role})</span>
+              <span className="font-mono text-[10px] text-neutral-500">ID: {currentUser.id}</span>
+            </h3>
+
+            {/* EDIT PROFILE SECTION */}
+            <form onSubmit={handleUpdateProfileSubmit} className="space-y-4 bg-stone-50 border border-neutral-300 p-4 rounded">
+              <div className="flex items-center justify-between border-b pb-1">
+                <h4 className="font-bold text-neutral-900 text-xs">แก้ไขประวัติข้อมูลและรูปภาพลายเซ็น</h4>
+                
+                
+              </div>
+              
+              <div className="flex flex-col sm:flex-row items-center gap-6 p-2 rounded mb-1">
+                <div className="w-16 h-20 rounded border border-neutral-400 overflow-hidden shrink-0">
+                  <img src={editPhoto} alt="avatar" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                </div>
+                <div className="space-y-1 w-full">
+                  <span className="font-bold text-[10px] text-neutral-700">อัปเดตไฟล์รูปถ่ายประจำตัวผู้ใช้:</span>
+                  {isEditingProfile ? (
+                    <input
+                      id="seoPhotoUploadInput"
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) {
+                          const r = new FileReader();
+                          r.onloadend = () => setEditPhoto(r.result as string);
+                          r.readAsDataURL(f);
+                        }
+                      }}
+                      className="block text-[10px] text-neutral-400 file:mr-2 file:py-0.5 file:px-2 file:rounded file:border-0 file:text-[9px] file:font-semibold file:bg-neutral-950 file:text-white hover:file:bg-neutral-850 cursor-pointer"
+                    />
+                  ) : (
+                    <p className="text-[10px] text-neutral-500 italic">* กดปุ่มแก้ไขข้อมูลเพื่อเลือกไฟล์รูปภาพใหม่</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-1">
+                  <label className="block text-[9px] font-bold text-neutral-800 mb-0.5">คำนำหน้าชื่อ / ยศ (Title/Prefix) *</label>
+                  <input 
+                    type="text" 
+                    required 
+                    disabled={true} 
+                    value={editTitle} 
+                    onChange={(e) => setEditTitle(e.target.value)} 
+                    placeholder="เช่น นาย, ว่าที่ ร.ต."
+                    className="w-full border px-2 py-1 rounded focus:outline-none text-xs transition-colors bg-neutral-150 border-neutral-250 text-neutral-500 cursor-not-allowed" 
+                  />
+                </div>
+                <div className="sm:col-span-1">
+                  <label className="block text-[9px] font-bold text-neutral-800 mb-0.5">ชื่อจริงภาษาไทย *</label>
+                  <input 
+                    type="text" 
+                    required 
+                    disabled={!isEditingProfile} 
+                    value={editFirstNameTh} 
+                    onChange={(e) => setEditFirstNameTh(e.target.value)} 
+                    placeholder="ภาษาไทย"
+                    className={`w-full border px-2 py-1 rounded focus:outline-none text-xs transition-colors ${!isEditingProfile ? 'bg-neutral-150 border-neutral-250 text-neutral-500 cursor-not-allowed' : 'bg-white border-neutral-300'}`} 
+                  />
+                </div>
+                <div className="sm:col-span-1">
+                  <label className="block text-[9px] font-bold text-neutral-800 mb-0.5">นามสกุลภาษาไทย *</label>
+                  <input 
+                    type="text" 
+                    required 
+                    disabled={!isEditingProfile} 
+                    value={editLastNameTh} 
+                    onChange={(e) => setEditLastNameTh(e.target.value)} 
+                    placeholder="ภาษาไทย"
+                    className={`w-full border px-2 py-1 rounded focus:outline-none text-xs transition-colors ${!isEditingProfile ? 'bg-neutral-150 border-neutral-250 text-neutral-500 cursor-not-allowed' : 'bg-white border-neutral-300'}`} 
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-[9px] font-bold text-neutral-800 mb-0.5">อีเมลผู้ใช้งาน *</label>
+                  <input 
+                    type="email" 
+                    required 
+                    disabled={!isEditingProfile} 
+                    value={editEmail} 
+                    onChange={(e) => setEditEmail(e.target.value)} 
+                    className={`w-full border px-2 py-1 rounded focus:outline-none text-xs font-mono transition-colors ${!isEditingProfile ? 'bg-neutral-150 border-neutral-250 text-neutral-500 cursor-not-allowed' : 'bg-white border-neutral-300'}`} 
+                  />
+                </div>
+                <div>
+                  <label className="block text-[9px] font-bold text-neutral-800 mb-0.5">เปลี่ยนรหัสผ่านเพื่อเข้าใช้งานรอบถัดไป *</label>
+                  <div className="relative">
+                    <input 
+                      type={showEditPassword ? "text" : "password"} 
+                      required 
+                      disabled={!isEditingProfile} 
+                      value={editPassword} 
+                      onChange={(e) => setEditPassword(e.target.value)} 
+                      className={`w-full border pl-2 pr-8 py-1 rounded focus:outline-none text-xs font-mono transition-colors ${!isEditingProfile ? 'bg-neutral-150 border-neutral-250 text-neutral-500 cursor-not-allowed' : 'bg-white border-neutral-300'}`} 
+                    />
+                    {isEditingProfile && (
+                      <button
+                        type="button"
+                        onClick={() => setShowEditPassword(!showEditPassword)}
+                        className="absolute inset-y-0 right-0 flex items-center pr-2.5 text-neutral-400 hover:text-neutral-700 cursor-pointer"
+                      >
+                        {showEditPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-[9px] font-bold text-neutral-800">ปรับแก้ลายเซ็นมือถือรับรองรายงาน *</label>
+                {!isEditingProfile ? (
+                  <div className="w-full max-w-sm space-y-2">
+                    <div className="w-full p-4 bg-stone-150 border border-neutral-300 rounded flex items-center justify-center min-h-[96px] select-none">
+                      {editSig ? (
+                        <img src={editSig} alt="Signature Preview" className="max-h-16 object-contain" referrerPolicy="no-referrer" />
+                      ) : (
+                        <span className="text-[11px] text-neutral-450 italic">ยังไม่มีลายเซ็นลงทะเบียน</span>
+                      )}
+                    </div>
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingProfile(true)}
+                        className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded font-bold cursor-pointer text-[10px] shadow-sm transition-colors"
+                      >
+                        <Edit3 size={12} />
+                        <span>แก้ไขข้อมูลส่วนตัว</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="w-full max-w-sm">
+                    <SignaturePad onSave={(data) => setEditSig(data)} defaultValue={editSig} />
+                  </div>
+                )}
+              </div>
+
+              <div className="pt-3 border-t flex justify-end gap-2">
+                {isEditingProfile && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleCancelEditProfile}
+                      className="flex items-center gap-1 bg-neutral-200 hover:bg-neutral-300 text-neutral-800 px-3 py-1.5 rounded font-bold cursor-pointer text-[10px] transition-colors"
+                    >
+                      <X size={12} />
+                      <span>ยกเลิก (Cancel)</span>
+                    </button>
+                    <button 
+                      id="saveSeoProfileBtn" 
+                      type="submit" 
+                      className="flex items-center gap-1 bg-[#0F172A] hover:bg-neutral-800 text-white px-4 py-1.5 rounded font-bold cursor-pointer text-[10px] shadow-sm transition-colors"
+                    >
+                      <span>บันทึกการแก้ไขข้อมูลส่วนตัวของฉัน</span>
+                    </button>
+                  </>
+                )}
+              </div>
+            </form>
+
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-6 p-4 bg-stone-100/50 border border-neutral-300 rounded">
+              <div className="flex flex-col sm:flex-row items-center gap-6">
+                <img src={currentUser.photoUrl} alt="avatar" className="w-16 h-20 object-cover rounded border border-neutral-400 shrink-0" referrerPolicy="no-referrer" />
+                <div>
+                  <h4 className="font-bold text-neutral-900 text-sm">
+                    {currentUser.title ? currentUser.title : ''}{currentUser.firstNameTh || ''} {currentUser.lastNameTh || ''}
+                  </h4>
+                  <p className="font-sans text-[11px] text-neutral-600">ตำแหน่งการช่าง: <b>{currentUser.role}</b></p>
+                  <span className="bg-emerald-50 text-emerald-800 border border-emerald-300 font-mono text-[10px] px-2 py-0.5 rounded font-bold mt-2 inline-block">
+                    บัญชีพร้อมใช้งาน (Approved)
+                  </span>
+                </div>
+              </div>
+              
+              {/* Profile QR Verification block */}
+              <div className="flex flex-col items-center bg-white p-3 rounded-lg border border-neutral-300 shadow-xs shrink-0 select-none">
+                <img 
+                  src={`https://api.qrserver.com/v1/create-qr-code/?size=150x150&data=${encodeURIComponent(getAppOriginForQR() + '/?id=' + currentUser.id)}`} 
+                  alt="Student ID QR Code" 
+                  className="w-16 h-16 rounded border border-neutral-100 p-0.5"
+                  referrerPolicy="no-referrer"
+                />
+                <span className="text-[7.5px] font-mono font-bold text-neutral-500 mt-1.5 uppercase tracking-wider">VERIFICATION QR</span>
+                <span className="text-[9px] text-[#0F172A] font-bold mt-0.5">{currentUser.id}</span>
+              </div>
+            </div>
+
+            {/* End of content */}
+          </div>
+        )}
+
+        {/* TAB 0: HOME / DASHBOARD */}
+        {activeTab === 'home' && (
+          <div className="space-y-6 animate-fade-in">
+            {/* Header / Welcome panel */}
+            <div className="p-5 bg-gradient-to-r from-slate-900 to-slate-800 text-white rounded-xl shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-full overflow-hidden border-2 border-white/20 shadow-sm shrink-0">
+                    <img 
+                      src={currentUser.photoUrl || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100"} 
+                      alt="avatar" 
+                      className="w-full h-full object-cover"
+                      referrerPolicy="no-referrer"
+                    />
+                  </div>
+                  <div>
+                    <h3 className="font-sans font-black text-sm tracking-tight text-white">
+                      ยินดีต้อนรับ, {currentUser.title ? currentUser.title + ' ' : ''}{currentUser.firstNameTh || currentUser.firstName} {currentUser.lastNameTh || currentUser.lastName}
+                    </h3>
+                    <p className="text-[10px] text-slate-300 font-medium">
+                      รหัสนักศึกษา: <span className="font-mono font-bold text-white">{currentUser.id}</span> | รุ่นปีการศึกษา: <span className="font-mono font-bold text-white">{studentBatch}</span>
+                    </p>
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[9px] px-2 py-0.5 rounded-full font-bold">
+                    สถานะการเรียน: กำลังศึกษา
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Grid for Schedule and Grades */}
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+              
+              {/* ตารางเรียนของฉัน */}
+              <div className="bg-white border border-neutral-200 rounded-xl p-4 shadow-3xs space-y-3">
+                <div className="flex items-center justify-between border-b pb-2">
+                  <h4 className="font-sans font-black text-xs text-slate-900 flex items-center gap-1.5">
+                    <Calendar size={14} className="text-blue-600" />
+                    <span>ตารางเรียนของฉัน (รุ่น {studentBatch})</span>
+                  </h4>
+                  <button 
+                    onClick={() => setActiveTab('academic')}
+                    className="text-[10px] font-bold text-blue-600 hover:underline"
+                  >
+                    ดูปฏิทินทั้งหมด &rarr;
+                  </button>
+                </div>
+
+                <div className="space-y-2 max-h-[350px] overflow-y-auto pr-1">
+                  {classSchedules.filter(s => s.batch === studentBatch).length === 0 ? (
+                    <div className="text-center py-8 text-slate-400 text-[11px] font-medium border border-dashed rounded-lg">
+                      ยังไม่มีข้อมูลตารางเรียนในรุ่นนี้
+                    </div>
+                  ) : (
+                    classSchedules.filter(s => s.batch === studentBatch).map(s => (
+                      <div key={s.id} className="p-3 bg-slate-50 border border-slate-100 rounded-lg hover:border-slate-300 transition-colors">
+                        <div className="flex justify-between items-start">
+                          <div>
+                            <span className="inline-block bg-blue-100 text-blue-800 text-[9px] font-bold px-1.5 py-0.5 rounded font-mono mr-2">
+                              {s.subjectCode}
+                            </span>
+                            <span className="font-sans font-bold text-[11px] text-slate-900">{s.subjectName}</span>
+                          </div>
+                          <span className="text-[10px] font-bold text-slate-500">
+                            วัน{s.dayOfWeek}
+                          </span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-slate-500 font-medium">
+                          <span>ช่วงวันที่เรียน: <span className="font-mono">{s.startDate} ถึง {s.endDate}</span></span>
+                          {s.instructorName && (
+                            <span>ผู้สอน: <span className="text-slate-700">{s.instructorName}</span></span>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* คะแนนการทดสอบล่าสุด */}
+              <div className="bg-white border border-neutral-200 rounded-xl p-4 shadow-3xs space-y-3">
+                <div className="flex items-center justify-between border-b pb-2">
+                  <h4 className="font-sans font-black text-xs text-slate-900 flex items-center gap-1.5">
+                    <Award size={14} className="text-emerald-600" />
+                    <span>ผลการสอบและคะแนนสะสมของฉัน</span>
+                  </h4>
+                </div>
+
+                <div className="space-y-2 max-h-[350px] overflow-y-auto pr-1">
+                  {(() => {
+                    const myGrades = examGrades.filter(eg => eg.grades.some(g => g.studentId === currentUser.id));
+                    
+                    if (myGrades.length === 0) {
+                      return (
+                        <div className="text-center py-8 text-slate-400 text-[11px] font-medium border border-dashed rounded-lg">
+                          ยังไม่มีข้อมูลคะแนนสอบของคุณในขณะนี้
+                        </div>
+                      );
+                    }
+
+                    return myGrades.map(eg => {
+                      const grade = eg.grades.find(g => g.studentId === currentUser.id);
+                      if (!grade) return null;
+
+                      return (
+                        <div key={eg.id} className="p-3 bg-emerald-50/40 border border-emerald-100 rounded-lg hover:border-emerald-300 transition-colors">
+                          <div className="flex justify-between items-center">
+                            <div>
+                              <h5 className="font-sans font-bold text-[11px] text-slate-900">{eg.subjectName}</h5>
+                              <p className="text-[10px] text-slate-500 mt-0.5">
+                                รอบการสอบ: <span className="font-medium text-slate-700">{eg.round}</span>
+                              </p>
+                            </div>
+                            <div className="text-right">
+                              <span className="text-xs font-mono font-black text-emerald-700 bg-emerald-100/80 px-2 py-1 rounded-md">
+                                {grade.score} คะแนน
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    });
+                  })()}
+                </div>
+              </div>
+
+            </div>
+          </div>
+        )}
+
+        {/* TAB 1.5: ACADEMIC DATA */}
+        {isStudent && activeTab === 'academic' && (
+          <div className="animate-fade-in">
+            <AcademicDataSection classSchedules={classSchedules} examSchedules={examSchedules} examGrades={examGrades} currentUser={currentUser} />
+          </div>
+        )}
+
+        {/* TAB 2: SPECIAL ACTION PER POSITION (Form add) */}
+        {activeTab === 'action' && (
+          <div className="space-y-6 animate-fade-in">
+            
+            {/* Content per subtab */}
+
+            {/* If (OFFICE or INSTRUCTOR) with 'schedule' subtab: ADD/EDIT SCHEDULES */}
+            {((isOffice || isInstructor) && instActionTab === 'schedule') && (
+              <form onSubmit={handleCreateSchedule} className="space-y-4">
+                <h3 className="font-sans font-extrabold text-sm border-b pb-2 text-neutral-950 uppercase">
+                  เปิดคอร์สวิชาและลงตารางเรียนนักศึกษาการช่าง
+                </h3>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-700 mb-1">รุ่นนักศึกษา (เช่น 67) *</label>
+                    <select
+                      id="optSchBatchSelect"
+                      value={schBatch}
+                      onChange={(e) => setSchBatch(e.target.value)}
+                      className="w-full border border-neutral-350 px-2 py-2 rounded bg-white font-mono"
+                    >
+                      {dbBatches.map(b => (
+                        <option key={b} value={b}>รุ่น {b}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-700 mb-1">รหัสวิชาหลักสูตร *</label>
+                    <input
+                      id="optSchCodeInput"
+                      type="text"
+                      required
+                      placeholder="เช่น AMT-104"
+                      value={schCode}
+                      onChange={(e) => setSchCode(e.target.value)}
+                      className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-700 mb-1">ชื่อวิชาเรียนเต็ม *</label>
+                    <input
+                      id="optSchNameInput"
+                      type="text"
+                      required
+                      placeholder="เช่น Turbine Engine Maintenance"
+                      value={schName}
+                      onChange={(e) => setSchName(e.target.value)}
+                      className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="bg-neutral-50 p-4 rounded-lg border border-neutral-200">
+                  <span className="block text-[10px] font-bold text-neutral-700 mb-2">เลือกวันที่มีเรียนประจำสัปดาห์ (เลือกได้มากกว่า 1 วัน) *</span>
+                  <div className="flex flex-wrap gap-2">
+                    {DAYS_OF_WEEK_LIST.map((day) => {
+                      const isSelected = schDays.includes(day.key as any);
+                      return (
+                        <button
+                          key={day.key}
+                          type="button"
+                          id={`btnSchDaySelect-${day.key}`}
+                          onClick={() => {
+                            if (isSelected) {
+                              setSchDays(schDays.filter((d) => d !== day.key));
+                            } else {
+                              setSchDays([...schDays, day.key as any]);
+                            }
+                          }}
+                          className={`px-3 py-1.5 rounded-lg border text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
+                            isSelected
+                              ? 'bg-neutral-900 border-neutral-900 text-white shadow-xs scale-105'
+                              : 'bg-white border-neutral-300 text-neutral-600 hover:bg-neutral-100'
+                          }`}
+                        >
+                          <span className={`w-2.5 h-2.5 rounded-full inline-block ${
+                            day.key === 'จันทร์' ? 'bg-yellow-400' :
+                            day.key === 'อังคาร' ? 'bg-pink-400' :
+                            day.key === 'พุธ' ? 'bg-emerald-400' :
+                            day.key === 'พฤหัส' ? 'bg-amber-400' :
+                            day.key === 'ศุกร์' ? 'bg-sky-400' :
+                            day.key === 'เสาร์' ? 'bg-purple-400' :
+                            'bg-red-400'
+                          }`} />
+                          <span>{day.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-700 mb-1">วันที่เริ่มเรียนคลาสแรก *</label>
+                    <input
+                      id="optSchStartInput"
+                      type="date"
+                      required
+                      value={schStart}
+                      onChange={(e) => setSchStart(e.target.value)}
+                      className="w-full border border-neutral-300 px-3 py-1.5 rounded focus:outline-none font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-700 mb-1">วันที่สิ้นเรียนคลาสสุดท้าย *</label>
+                    <input
+                      id="optSchEndInput"
+                      type="date"
+                      required
+                      value={schEnd}
+                      onChange={(e) => setSchEnd(e.target.value)}
+                      className="w-full border border-neutral-300 px-3 py-1.5 rounded focus:outline-none font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-700 mb-1">ชื่อสลักครูผู้ชี้สอน *</label>
+                    <input
+                      id="optSchTeacherInput"
+                      type="text"
+                      required
+                      placeholder="เช่น Instructor Somsak"
+                      value={schTeacher}
+                      onChange={(e) => setSchTeacher(e.target.value)}
+                      className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end pt-2 border-t">
+                  <button
+                    id="submitSchBtn"
+                    type="submit"
+                    className="bg-black hover:bg-neutral-850 text-white font-extrabold px-6 py-2 rounded shadow text-xs cursor-pointer"
+                  >
+                    เปิดตารางตริยวิชา
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {/* If EXAM DEPT: SCHEDULE EXAMS & GRADES */}
+            {isExam && (
+              <div className="space-y-6">
+                
+                {/* 1. Schedule Exam */}
+                <form onSubmit={handleScheduleExam} className="bg-neutral-50 p-4 border border-neutral-300 rounded-lg space-y-4">
+                  <h4 className="font-sans font-bold text-neutral-950 uppercase border-b pb-1 text-xs">นัดกำหนดการสอบนักศึกษาการช่าง</h4>
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-bold text-neutral-700 mb-1">รุ่นนักศึกษา *</label>
+                      <select
+                        id="examBatchSelect"
+                        value={exBatch}
+                        onChange={(e) => {
+                          const newBatch = e.target.value;
+                          setExBatch(newBatch);
+                          const subjects = Array.from(
+                            new Set(
+                              classSchedules
+                                .filter((s) => s.batch === newBatch)
+                                .map((s) => `${s.subjectCode} ${s.subjectName}`)
+                            )
+                          );
+                          setExSubject(subjects.length > 0 ? subjects[0] : '');
+                        }}
+                        className="w-full border border-neutral-300 px-1.5 py-1.5 rounded bg-white font-mono text-xs"
+                      >
+                        {dbBatches.map(b => (
+                          <option key={b} value={b}>รุ่น {b}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="col-span-2">
+                      <label className="block text-[10px] font-bold text-neutral-700 mb-1">วิชาที่สอบ *</label>
+                      {Array.from(
+                        new Set(
+                          classSchedules
+                            .filter((s) => s.batch === exBatch)
+                            .map((s) => `${s.subjectCode} ${s.subjectName}`)
+                        )
+                      ).length > 0 ? (
+                        <select
+                          id="examSubjectInput"
+                          required
+                          value={exSubject}
+                          onChange={(e) => setExSubject(e.target.value)}
+                          className="w-full border border-neutral-300 px-3 py-2.5 rounded focus:outline-none bg-white font-sans text-xs"
+                        >
+                          {Array.from(
+                            new Set(
+                              classSchedules
+                                .filter((s) => s.batch === exBatch)
+                                .map((s) => `${s.subjectCode} ${s.subjectName}`)
+                            )
+                          ).map((sub) => (
+                            <option key={sub} value={sub}>
+                              {sub}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="text-rose-500 font-semibold p-2 border border-rose-200 bg-rose-50 rounded text-[11px]">
+                          ไม่มีรายวิชาเรียนในระบบที่เป็นของ รุ่น {exBatch} ในขณะนี้ โปรดเพิ่มตารางเรียนก่อน
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-neutral-700 mb-1">วันเวลาสอบ *</label>
+                      <input
+                        id="examDateInput"
+                        type="date"
+                        required
+                        value={exDate}
+                        onChange={(e) => setExDate(e.target.value)}
+                        className="w-full border border-neutral-300 px-3 py-1.5 rounded focus:outline-none font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex justify-end pt-1">
+                    <button id="submitExamBtn" type="submit" className="bg-black text-white hover:bg-neutral-850 px-5 py-2 rounded text-xs font-bold cursor-pointer">
+                      นัดรวมรวมสอบกลาง
+                    </button>
+                  </div>
+                </form>
+
+                {/* 2. Publish Grades */}
+                <form onSubmit={handlePublishGrades} className="bg-white p-4 border border-neutral-300 rounded-lg space-y-4">
+                  <h4 className="font-sans font-bold text-neutral-950 uppercase border-b pb-1 text-xs">ประกาศประเมินสรุปคะแนนสอบ</h4>
+                  
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-[10px] font-bold text-neutral-700 mb-1">รุ่นนักเรียน *</label>
+                      <select
+                        id="gradeBatchSelect"
+                        value={gradeBatch}
+                        onChange={(e) => {
+                          const newBatch = e.target.value;
+                          setGradeBatch(newBatch);
+                          const subjects = Array.from(
+                            new Set(
+                              classSchedules
+                                .filter((s) => s.batch === newBatch)
+                                .map((s) => `${s.subjectCode} ${s.subjectName}`)
+                            )
+                          );
+                          setGradeSubject(subjects.length > 0 ? subjects[0] : '');
+                        }}
+                        className="w-full border border-neutral-300 px-1.5 py-1.5 rounded bg-white font-mono text-xs"
+                      >
+                        {dbBatches.map(b => (
+                          <option key={b} value={b}>รุ่น {b}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-neutral-700 mb-1">วิชาเรียน *</label>
+                      {Array.from(
+                        new Set(
+                          classSchedules
+                            .filter((s) => s.batch === gradeBatch)
+                            .map((s) => `${s.subjectCode} ${s.subjectName}`)
+                        )
+                      ).length > 0 ? (
+                        <select
+                          id="gradeSubjectInput"
+                          required
+                          value={gradeSubject}
+                          onChange={(e) => setGradeSubject(e.target.value)}
+                          className="w-full border border-neutral-300 px-3 py-2.5 rounded focus:outline-none bg-white font-sans text-xs"
+                        >
+                          {Array.from(
+                            new Set(
+                              classSchedules
+                                .filter((s) => s.batch === gradeBatch)
+                                .map((s) => `${s.subjectCode} ${s.subjectName}`)
+                            )
+                          ).map((sub) => (
+                            <option key={sub} value={sub}>
+                              {sub}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <div className="text-rose-500 font-semibold p-2 border border-rose-200 bg-rose-50 rounded text-[11px]">
+                          ไม่มีรายวิชาเรียนในระบบที่เป็นของ รุ่น {gradeBatch} ในขณะนี้ โปรดเพิ่มตารางเรียนก่อน
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-bold text-neutral-700 mb-1">ครั้งที่พิจารณา (Round) *</label>
+                      <input
+                        id="gradeRoundInput"
+                        type="number"
+                        min={1}
+                        required
+                        value={gradeRound}
+                        onChange={(e) => setGradeRound(parseInt(e.target.value) || 1)}
+                        className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none font-mono"
+                      />
+                    </div>
+                  </div>
+
+                  {/* List batch students for grading */}
+                  <div className="border border-neutral-200 rounded p-3 bg-stone-50 max-h-48 overflow-y-auto">
+                    <span className="font-bold block mb-2 text-neutral-600 uppercase text-[10px]">รายชื่อนักเรียนรุ่น {gradeBatch} เพื่อกรอกคะแนน (เปอร์เซ็นต์เต็ม 100)</span>
+                    <div className="space-y-2">
+                      {users
+                        .filter(u => {
+                          if (u.role !== 'นักศึกษา') return false;
+                          const stdBatch = String(u.id || '').substring(0, 2);
+                          return stdBatch === gradeBatch;
+                        })
+                        .map(std => (
+                          <div key={std.id} className="flex justify-between items-center bg-white p-2 border rounded shadow-xs text-xs">
+                            <span className="font-bold">{std.id} - {std.firstName} {std.lastName}</span>
+                            <input
+                              type="number"
+                              min={0}
+                              max={100}
+                              placeholder="กรอกคะแนน"
+                              value={studentGrades[std.id] || ''}
+                              onChange={(e) => setStudentGrades({ ...studentGrades, [std.id]: parseInt(e.target.value) || 0 })}
+                              className="w-20 border px-2 py-1 text-center rounded font-mono font-bold"
+                            />
+                          </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end pt-1">
+                    <button id="submitGradesBtn" type="submit" className="bg-black text-white hover:bg-neutral-850 px-5 py-2 rounded text-xs font-bold cursor-pointer">
+                      ประกาศรับรองเกรดลงชีต
+                    </button>
+                  </div>
+                </form>
+
+              </div>
+            )}
+
+            {/* If STUDENT or ((INSTRUCTOR or OFFICE or EXAM) with 'room' subtab): SUBMIT ROOM REQUEST OR RECORD DIRECT USAGE */}
+            {(isStudent || ((isInstructor || isOffice || isExam) && instActionTab === 'room')) && (
+              <div className="space-y-6">
+                {/* Switcher pills */}
+                <div className="flex gap-2 p-1 bg-neutral-100 rounded-lg w-full max-w-md no-print">
+                  <button
+                    type="button"
+                    onClick={() => setRoomSubForm('request')}
+                    className={`flex-1 text-center py-2 rounded-md font-sans font-bold text-[11px] transition-all cursor-pointer ${
+                      roomSubForm === 'request'
+                        ? 'bg-white text-neutral-950 shadow-xs border border-neutral-200'
+                        : 'text-neutral-500 hover:text-neutral-850'
+                    }`}
+                  >
+                    1. ขอใช้พื้นที่ห้องปฏิบัติการ (TLTC-MO-033)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRoomSubForm('usage')}
+                    className={`flex-1 text-center py-2 rounded-md font-sans font-bold text-[11px] transition-all cursor-pointer ${
+                      roomSubForm === 'usage'
+                        ? 'bg-white text-neutral-950 shadow-xs border border-neutral-200'
+                        : 'text-neutral-500 hover:text-neutral-850'
+                    }`}
+                  >
+                    2. บันทึกการใช้งานห้อง (TLTC-MO-034)
+                  </button>
+                </div>
+
+                {roomSubForm === 'request' ? (
+                  <form onSubmit={handleRoomSubmit} className="space-y-4">
+                    <h3 className="font-sans font-extrabold text-sm border-b pb-2 text-neutral-950 uppercase">
+                      เขียนใบร้องขอเข้าใช้พื้นที่ปฏิบัติการซ่อม (TLTC-MO-033)
+                    </h3>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-neutral-700 mb-1">ฝ่ายวิทยา สังกัดแผนกหน่วยงาน *</label>
+                        <input
+                          id="reqDeptInput"
+                          type="text"
+                          required
+                          placeholder="เช่น ฝ่ายทดสอบปีก ช่างการบินรุ่น 67"
+                          value={department}
+                          onChange={(e) => setDepartment(e.target.value)}
+                          className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-neutral-700 mb-1">เบอร์ฉุกเฉิน *</label>
+                        <input
+                          id="reqPhoneInput"
+                          type="text"
+                          required
+                          placeholder="เช่น 089-xxxxxxx"
+                          value={phone}
+                          onChange={(e) => setPhone(e.target.value)}
+                          className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none font-mono"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-neutral-700 mb-1">วันที่ต้องการเข้าใช้งานห้อง *</label>
+                        <input
+                          id="reqDateInput"
+                          type="date"
+                          required
+                          value={requestDate}
+                          onChange={(e) => setRequestDate(e.target.value)}
+                          className="w-full border border-neutral-300 px-3 py-1.5 rounded focus:outline-none font-mono text-xs bg-white"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-neutral-700 mb-1">เวลาการจอง (ชั่วโมง) *</label>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="block text-[8px] font-bold text-neutral-450 mb-0.5">ตั้งแต่เวลา</label>
+                            <select
+                              id="reqStartTimeSelect"
+                              value={startTime}
+                              onChange={(e) => setStartTime(e.target.value)}
+                              className="w-full border border-neutral-300 px-2 py-1.5 rounded bg-white text-xs font-semibold"
+                            >
+                              {TIME_OPTIONS.map(time => (
+                                <option key={time} value={time}>{time}</option>
+                              ))}
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-[8px] font-bold text-neutral-450 mb-0.5">ถึงเวลา</label>
+                            <select
+                              id="reqEndTimeSelect"
+                              value={endTime}
+                              onChange={(e) => setEndTime(e.target.value)}
+                              className="w-full border border-neutral-300 px-2 py-1.5 rounded bg-white text-xs font-semibold"
+                            >
+                              {TIME_OPTIONS.map(time => (
+                                <option key={time} value={time}>{time}</option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-[10px] font-bold text-neutral-700 mb-1">พื้นที่ปฏิบัติงานที่ต้องการขอจอง *</label>
+                        <select
+                          id="reqRoomSelect"
+                          value={selectedRoom}
+                          onChange={(e) => setSelectedRoom(e.target.value)}
+                          className={`w-full border px-2 py-1.5 rounded focus:outline-none bg-white text-xs font-semibold ${
+                            selectedRoom !== 'Other' && checkRoomBusy(selectedRoom) 
+                              ? 'border-rose-450 text-rose-600 bg-rose-50' 
+                              : 'border-neutral-300'
+                          }`}
+                        >
+                          {[
+                            "Practical Area in Hangar",
+                            "Meeting Room",
+                            "Theoretical Classroom",
+                            "Library Room",
+                            "Workshop 1",
+                            "Workshop 2",
+                            "Fiberglass Workshop",
+                            "Examination Room",
+                            "Aerodynamic Room",
+                            "Electrical Room"
+                          ].map(room => {
+                            const isBusy = checkRoomBusy(room);
+                            const isDateTimeFilled = !!(requestDate && startTime && endTime && (startTime < endTime));
+                            const statusSuffix = isDateTimeFilled ? (isBusy ? " (ไม่ว่าง)" : " (ว่าง)") : " (ว่าง)";
+                            return (
+                              <option key={room} value={room} disabled={isBusy}>
+                                {room}{statusSuffix}
+                              </option>
+                            );
+                          })}
+                          <option value="Other">อื่นๆ (ระบุห้องด้านล่าง)</option>
+                        </select>
+                        {selectedRoom !== 'Other' && checkRoomBusy(selectedRoom) && (
+                          <p className="text-[9px] text-rose-600 font-semibold mt-1">⚠️ ห้องนี้ถูกจองใช้ในช่วงเวลาดังกล่าวแล้ว</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {selectedRoom === 'Other' && (
+                      <div className="mt-4">
+                        <label className="block text-[10px] font-bold text-neutral-700 mb-1">กรอกข้อมูลระบุชื่อห้องอื่น *</label>
+                        <input
+                          id="reqOtherRoomInput"
+                          type="text"
+                          required
+                          placeholder="เช่น ห้องล้างเครื่องยนต์"
+                          value={otherRoomText}
+                          onChange={(e) => setOtherRoomText(e.target.value)}
+                          className={`w-full border px-3 py-2 rounded focus:outline-none ${
+                            checkRoomBusy(otherRoomText) ? 'border-rose-450 text-rose-600 bg-rose-50' : 'border-neutral-300'
+                          }`}
+                        />
+                        {checkRoomBusy(otherRoomText) && (
+                          <p className="text-[9px] text-rose-600 font-semibold mt-1">⚠️ ห้องระบุดังกล่าวไม่ว่างในช่วงเวลาที่เลือก</p>
+                        )}
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-neutral-700 mb-1">จุดประสงค์กิจกรรมคราดการเข้าใช้งานอย่างชัดถ้อยชัดใบ *</label>
+                      <textarea
+                        id="reqPurposeTextarea"
+                        required
+                        rows={2}
+                        placeholder="ระบุ เช่น ตรวจเทียบวันหมดประกันเครื่องวัด Dial Gauges"
+                        value={purpose}
+                        onChange={(e) => setPurpose(e.target.value)}
+                        className="w-full border border-neutral-300 px-3 py-2 rounded"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-neutral-750">ลงนามลายเซ็นรับคำยืนยันเอกสาร *</label>
+                      <div className="w-full max-w-sm">
+                        <SignaturePad onSave={(data) => setRequestSignature(data)} />
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end pt-2 border-t">
+                      <button id="sendRoomRequestBtn" type="submit" className="bg-neutral-950 text-white font-bold px-6 py-2 rounded hover:bg-neutral-850 cursor-pointer text-xs">
+                        บันทึกส่งเอกสารขอจอง
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <form onSubmit={handleUsageRecordSubmit} className="space-y-4 max-w-2xl bg-white border border-neutral-300 p-5 rounded-lg shadow-xs">
+                    <h3 className="font-sans font-extrabold text-xs border-b pb-2 text-neutral-900 uppercase">
+                      แบบฟอร์มบันทึกการเข้าใช้งานห้องปฏิบัติการ (TLTC-MO-034 logs)
+                    </h3>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-[10px] font-bold text-neutral-700 mb-1">พิมพ์ระบุชื่อห้อง / พื้นที่ห้องปฏิบัติการที่เข้าใช้ *</label>
+                        <input
+                          id="usageRoomNameInput"
+                          type="text"
+                          required
+                          placeholder="พิมพ์ชื่อห้อง เช่น Workshop 1 หรือ theoretical Classroom"
+                          value={usageRoomName}
+                          onChange={(e) => setUsageRoomName(e.target.value)}
+                          className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none focus:border-neutral-900 text-xs"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-neutral-700 mb-1">วันที่เข้าปฏิบัติงานจริง *</label>
+                        <input
+                          id="usageDateInput"
+                          type="date"
+                          required
+                          value={usageDate}
+                          onChange={(e) => setUsageDate(e.target.value)}
+                          className="w-full border border-neutral-300 px-3 py-1.5 rounded focus:outline-none font-mono text-xs"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[10px] font-bold text-neutral-700 mb-1">รายงานสิ่งที่ต้องการพัฒนา (ข้อสังเกต/อุปกรณ์ชำรุด/ความคิดเห็น) *</label>
+                      <textarea
+                        id="usageReportTextarea"
+                        required
+                        rows={3}
+                        placeholder="ระบุ เช่น เพิ่มสายดินหรืออุปกรณ์ความสว่าง, แอร์เสีย 1 เครื่อง หรือความพร้อมสมบูรณ์ดี..."
+                        value={usageReportText}
+                        onChange={(e) => setUsageReportText(e.target.value)}
+                        className="w-full border border-neutral-300 px-3 py-2 rounded text-xs focus:outline-none focus:border-neutral-900"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-[10px] font-bold text-neutral-750">ผู้เข้าปฏิบัติงานลงลายเซ็นรับรอง *</label>
+                      <div className="w-full max-w-sm">
+                        <SignaturePad onSave={(data) => setUsageSignature(data)} placeholder="วาดลายลายเซ็นอิเล็กทรอนิกส์..." />
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end pt-2 border-t">
+                      <button id="saveDirectRoomUsageBtn" type="submit" className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-6 py-2 rounded cursor-pointer text-xs transition-all shadow-3xs uppercase tracking-wide">
+                        บันทึกข้อมูลการใช้ห้องและเซ็นชื่อ
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+            )}
+
+          </div>
+        )}
+
+        {/* TAB 3: BORROW AND RETURN EQUIPMENT (FITTED WITH CAM SCANNERS) */}
+        {activeTab === 'borrow' && (
+          <div className="space-y-6">
+            
+            <div className="border border-neutral-300 p-5 rounded-lg bg-neutral-50/50">
+              <h3 className="font-sans font-extrabold text-sm mb-3 text-neutral-950 flex items-center gap-1.5 uppercase">
+                <Camera size={16} />
+                <span>เบิกและยืมเครื่องมือในอู่ / ตรวจสอบสแกนโค้ดสลักป้าย</span>
+              </h3>
+
+              {isCameraActive ? (
+                <div className="border-2 border-neutral-950 bg-neutral-950 rounded-lg p-4 text-center text-white relative min-h-[300px] flex flex-col justify-between items-center transition-all duration-350">
+                  <div className="absolute top-2 right-2 flex items-center gap-1.5 z-10 bg-neutral-900/60 px-2 py-0.5 rounded-full">
+                    <span className="w-2 h-2 bg-emerald-500 rounded-full animate-ping" />
+                    <span className="text-[9px] font-mono tracking-widest text-emerald-400">ACTIVE CAMERA</span>
+                  </div>
+
+                  <button 
+                    type="button" 
+                    onClick={() => setIsCameraActive(false)} 
+                    className="absolute top-2 left-2 bg-rose-900/90 hover:bg-rose-800 text-white text-[9px] font-bold px-2.5 py-1 rounded-md transition-all cursor-pointer z-10 shadow-md flex items-center gap-1"
+                  >
+                    <span>✕ ปิดหน้าเปิดกล้อง</span>
+                  </button>
+                  
+                  {/* Real Web Camera Stream View with Scanner HUD Overlay */}
+                  <div className="w-full mt-6">
+                    {cameraError ? (
+                      <div className="text-rose-400 text-[10px] font-bold p-3 bg-rose-950/40 rounded-lg max-w-md mx-auto mb-3 border border-rose-900/40 select-none">
+                        ⚠️ ขออภัย: {cameraError} <br />
+                        <span className="font-normal text-slate-300 mt-1 block">(ระบบตรวจพบขีดจำกัดเบราว์เซอร์ จึงสลับกลับสู่โหมดจำลองเพื่อทดสอบให้ท่านใช้ปุ่มด้านล่างสแกนทดสอบได้ทันที)</span>
+                      </div>
+                    ) : (
+                      <div className="relative w-full max-w-sm h-48 bg-neutral-900 rounded-lg overflow-hidden border border-neutral-700 mx-auto mb-3 flex items-center justify-center">
+                        <div 
+                          id="student-equipment-reader" 
+                          className="absolute inset-0 w-full h-full object-cover"
+                        />
+                        {/* Interactive Scanner laser targeting HUD overlay */}
+                        <div className="absolute inset-0 border border-emerald-500/20 flex items-center justify-center pointer-events-none z-10">
+                          <div className="w-48 h-28 border border-emerald-400/50 rounded flex items-center justify-center relative">
+                            <span className="absolute top-0 left-0 w-3 h-3 border-t-2 border-l-2 border-emerald-400" />
+                            <span className="absolute top-0 right-0 w-3 h-3 border-t-2 border-r-2 border-emerald-400" />
+                            <span className="absolute bottom-0 left-0 w-3 h-3 border-b-2 border-l-2 border-emerald-400" />
+                            <span className="absolute bottom-0 right-0 w-3 h-3 border-b-2 border-r-2 border-emerald-400" />
+                            <div className="w-44 h-0.5 bg-emerald-450 animate-bounce shadow-[0_0_10px_#10b981]" />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="w-full">
+                    <span className="block text-[9.5px] text-neutral-300 mb-2 font-semibold">หรือคุณสามารถคลิกเลือกปุ่มด้านล่างนี้ เพื่อ "สลับสแกนอุปกรณ์" จำลองได้ทันที:</span>
+                    <div className="flex flex-wrap justify-center gap-1 text-[10px]">
+                      {equipments.map(tool => {
+                        const isUnavailable = tool.qty === 0 || tool.status === 'NotReady' || tool.status === 'Damaged' || tool.status === 'Calibrating';
+                        return (
+                          <button
+                            key={tool.code}
+                            id={`simulateToolScanBtn_${tool.code}`}
+                            type="button"
+                            disabled={isUnavailable}
+                            onClick={() => handleSimulateScan(tool.code)}
+                            className={`px-2.5 py-1 rounded cursor-pointer font-bold font-mono transition-transform duration-100 hover:scale-105 border ${
+                              isUnavailable
+                                ? 'bg-rose-950/20 text-rose-300/40 border-rose-900/15 cursor-not-allowed line-through'
+                                : 'bg-white/10 hover:bg-emerald-600 hover:text-white border-white/20'
+                            }`}
+                            title={isUnavailable ? 'ไม่พร้อมใช้งาน' : tool.toolName}
+                          >
+                            สแกน {tool.code} {isUnavailable ? '(ไม่ว่าง)' : ''}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-center py-6 border-2 border-dashed border-neutral-300 rounded bg-white">
+                  <button
+                    id="activateCamScanBtn"
+                    type="button"
+                    onClick={() => setIsCameraActive(true)}
+                    className="flex items-center gap-2 bg-neutral-950 hover:bg-neutral-850 text-white font-sans font-extrabold px-6 py-2.5 rounded shadow inline-flex text-xs transition-colors cursor-pointer"
+                  >
+                    <Camera size={14} />
+                    <span>เปิดกล้องสแกนคิวอาร์โค้ดสลักป้ายอุปกรณ์</span>
+                  </button>
+                  <p className="text-[10px] text-neutral-400 mt-2">หรือกรอกรหัสคิวอาร์โค้ดตรงขวาเพื่อทำรายการแบบแมนนวล</p>
+                </div>
+              )}
+
+              {/* Manual input borrowing Form */}
+              <div className="bg-neutral-50 p-4 border border-neutral-300 rounded-md space-y-4">
+                <h5 className="font-sans font-extrabold text-neutral-900 border-b pb-1">1. ค้นหาและกรอกจำนวนเพื่อเลือกอุปกรณ์</h5>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-700 mb-1">รหัสคิวอาร์โค้ดอุปกรณ์ *</label>
+                    <input
+                      id="toolCodeManualInput"
+                      type="text"
+                      placeholder="เช่น AMT-TL-001"
+                      value={targetCode}
+                      onChange={(e) => {
+                        setTargetCode(e.target.value);
+                        const match = equipments.find(eq => eq.code.toLowerCase() === e.target.value.toLowerCase().trim());
+                        setScannedTool(match || null);
+                      }}
+                      className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none focus:border-neutral-900 font-mono text-sm uppercase bg-white"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-700 mb-1">จำนวนที่ยืม (QTY EA) *</label>
+                    <input
+                      id="borrowQtyInput"
+                      type="number"
+                      min={1}
+                      value={borrowQty}
+                      onChange={(e) => setBorrowQty(parseInt(e.target.value) || 1)}
+                      className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none focus:border-neutral-900 font-mono text-sm bg-white"
+                    />
+                  </div>
+                </div>
+
+                {scannedTool && (
+                  <div className="p-3 bg-white border border-neutral-300 rounded-md flex justify-between items-center text-xs">
+                    <div>
+                      <p className="font-sans font-bold text-neutral-950">{scannedTool.toolName}</p>
+                      <p className="text-[9px] text-neutral-500 font-mono">P/N: {scannedTool.partNumber} | ชั้นวาง: {scannedTool.location}</p>
+                    </div>
+                    {(() => {
+                      const totalBorrowed = borrowRecords
+                        .filter(r => r.equipmentCode === scannedTool.code && r.status !== 'Returned')
+                        .reduce((sum, r) => sum + r.qty, 0);
+                      const cartQty = borrowCart.filter(item => item.code === scannedTool.code).reduce((sum, item) => sum + item.qty, 0);
+                      const available = scannedTool.qty - totalBorrowed - cartQty;
+                      return (
+                        <span className={`font-sans font-bold text-white text-[10px] px-2 py-1 rounded ${available > 0 ? 'bg-neutral-950' : 'bg-rose-600'}`}>
+                          พร้อมยืมคลัง: {available} {available > 0 ? '' : '(หมด)'}
+                        </span>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleAddToBorrowCart}
+                    className="bg-emerald-600 text-white font-extrabold px-4 py-2 rounded hover:bg-emerald-700 text-xs shadow-sm cursor-pointer transition-colors"
+                  >
+                    + เพิ่มอุปกรณ์ลงในตารางยืม
+                  </button>
+                </div>
+              </div>
+
+              {/* Cart contents & Form submission */}
+              <form onSubmit={handleBorrowSubmit} className="space-y-4">
+                <div className="border border-neutral-300 p-4 rounded-md bg-white space-y-3">
+                  <h5 className="font-sans font-extrabold text-neutral-900 border-b pb-1 flex justify-between items-center">
+                    <span>2. ตารางอุปกรณ์ที่เลือกยืมในรอบนี้ (Selected Cart)</span>
+                    <span className="text-[10px] bg-neutral-200 text-neutral-850 px-2 py-0.5 rounded-full font-sans font-bold">
+                      {borrowCart.length} รายการ
+                    </span>
+                  </h5>
+
+                  {borrowCart.length === 0 ? (
+                    <div className="text-center py-6 text-neutral-400 text-xs">
+                      ยังไม่มีอุปกรณ์ที่เลือกเข้าตารางยืม กรุณากรองระบุอุปกรณ์ด้านบนแล้วกดเพิ่ม
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="border-b border-neutral-200 bg-neutral-50 text-neutral-700 font-bold">
+                            <th className="py-1.5 px-2">รหัสอุปกรณ์</th>
+                            <th className="py-1.5 px-2">ชื่ออุปกรณ์</th>
+                            <th className="py-1.5 px-2 text-center">จำนวน (EA)</th>
+                            <th className="py-1.5 px-2 text-center">การจัดการ</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {borrowCart.map((item, index) => (
+                            <tr key={index} className="border-b border-neutral-150 hover:bg-neutral-50">
+                              <td className="py-1.5 px-2 font-mono text-neutral-600">{item.code}</td>
+                              <td className="py-1.5 px-2 font-sans font-bold text-neutral-900">{item.toolName}</td>
+                              <td className="py-1.5 px-2 text-center font-bold font-mono">{item.qty}</td>
+                              <td className="py-1.5 px-2 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveFromBorrowCart(index)}
+                                  className="text-rose-600 hover:text-rose-800 font-bold hover:underline py-0.5 px-2"
+                                >
+                                  ลบ
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-neutral-800 mb-1">
+                      วัตถุประสงค์การยืม (เช่น JOB Card No. หรือระบุรายวิชา) *
+                    </label>
+                    <input
+                      id="borrowPurposeInput"
+                      type="text"
+                      required
+                      placeholder="กรอกวัตถุประสงค์การใช้ เช่น Job Card No. B737-200-Cabin / วิชา Aircraft Systems"
+                      value={borrowPurpose}
+                      onChange={(e) => setBorrowPurpose(e.target.value)}
+                      className="w-full border border-neutral-300 px-3 py-2 rounded focus:outline-none focus:border-neutral-900 text-xs font-sans font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="block text-[10px] font-bold text-neutral-800">
+                    เซ็นรับรองความปลอดภัยและยืนยันการยืมตามกฏระเบียบ *
+                  </label>
+                  <SignaturePad onSave={(data) => setBorrowSignature(data)} placeholder="วาดลายเซ็นของคุณด้านล่าง..." />
+                </div>
+
+                <div className="flex justify-end border-t pt-2">
+                  <button 
+                    id="executeBorrowBtn" 
+                    type="submit" 
+                    className="bg-neutral-950 text-white font-extrabold px-6 py-2.5 rounded hover:bg-neutral-800 text-xs shadow-sm cursor-pointer flex items-center gap-1.5 transition-colors"
+                  >
+                    เซ็นลายมืออนุมัติเบิกจ่ายการยืม ({borrowCart.length} รายการ)
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Display borrowed tools list (own and buddy roster) */}
+            <div className="border border-neutral-300 p-5 rounded-lg space-y-3">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-2 border-b border-neutral-150 pb-2 flex-wrap">
+                <h4 className="font-sans font-extrabold text-neutral-900 uppercase">
+                  ตารางเครื่องมือที่ถูกเบิกจ่าย (และครอบครองร่วมรุ่นช่าง)
+                </h4>
+                <button
+                  id="studentPrintTraceabilityLogBtn"
+                  type="button"
+                  onClick={() => setShowTraceabilityDoc(true)}
+                  className="flex items-center gap-1.5 bg-rose-655 hover:bg-rose-755 text-white font-sans font-extrabold text-[10px] px-3.5 py-2 rounded shadow-xs cursor-pointer select-none transition-transform duration-100 active:scale-95"
+                >
+                  <Printer size={12} />
+                  <span>พิมพ์ประวัติยืมเครื่องมือชุดนี้ (TLTC-MO-001)</span>
+                </button>
+              </div>
+
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-neutral-50 text-[10px] text-neutral-550 font-bold border-b border-neutral-200">
+                      <th className="py-2.5 px-2">วันเวลาที่ยืม</th>
+                      <th className="py-2.5 px-2">คิวอาร์โค้ด</th>
+                      <th className="py-2.5 px-2">ชื่ออุปกรณ์ช่างอากาศยาน</th>
+                      <th className="py-2.5 px-2">วัตถุประสงค์ / JOB Card</th>
+                      <th className="py-2.5 px-2">ผู้ถือเครื่องมือขณะนี้</th>
+                      <th className="py-2.5 px-2 text-center">หน่วย (EA)</th>
+                      <th className="py-2.5 px-2 text-center">คืนอุปกรณ์</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {borrowRecords
+                      .filter(rec => isStudent ? (rec.status === 'Borrowed' || rec.status === 'PendingReturn') : true)
+                      .map((rec) => {
+                        const isBorrowedByMe = rec.borrowerId === currentUser.id;
+                        return (
+                          <tr key={rec.id} className="border-b border-neutral-100 hover:bg-neutral-50 text-[11px]">
+                            <td className="py-2.5 px-2 font-mono text-neutral-550">{rec.borrowDate}</td>
+                            <td className="py-2.5 px-2 font-mono font-bold">{rec.equipmentCode}</td>
+                            <td className="py-2.5 px-2 font-bold text-neutral-900">{rec.toolName}</td>
+                            <td className="py-2.5 px-2 text-neutral-600 font-medium">{rec.purpose || '-'}</td>
+                            <td className="py-2.5 px-2 font-medium">
+                              {isBorrowedByMe ? (
+                                <span className="bg-neutral-950 text-white px-1.5 py-0.5 rounded text-[10px] font-bold">
+                                  คุณกำลังถืออยู่ (You)
+                                </span>
+                              ) : (
+                                <span>{rec.borrowerName} ({rec.borrowerId})</span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-2 text-center font-mono font-bold text-neutral-800">{rec.qty}</td>
+                            <td className="py-2.5 px-2 text-center">
+                              {rec.status === 'Returned' ? (
+                                <span className="text-neutral-450 italic">คืนแล้ว ({rec.returnDate})</span>
+                              ) : rec.status === 'PendingReturn' ? (
+                                <span className="text-amber-600 bg-amber-50 border border-amber-300 font-sans font-bold text-[9px] px-2 py-0.5 rounded inline-block animate-pulse">
+                                  รอฝ่ายรักษาบำรุงตรวจรับ
+                                </span>
+                              ) : (
+                                <button
+                                  id={`returnBtn_${rec.id}`}
+                                  hidden={!isBorrowedByMe}
+                                  onClick={() => {
+                                    onReturnEquipment(rec.id);
+                                    Swal.fire({ icon: 'success', title: 'คืนอุปกรณ์แล้ว', text: 'ส่งคืนสู่สารบบ เรียบร้อยแล้ว (รอฝ่ายซ่อมตรวจสอบแบริ่งต่อไป)', confirmButtonColor: '#171717' });
+                                  }}
+                                  className="bg-black hover:bg-neutral-800 text-white font-sans font-bold text-[9px] py-1 px-2.5 rounded transition-colors cursor-pointer"
+                                >
+                                  กดส่งคืนอุปกรณ์
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    {borrowRecords.length === 0 && (
+                      <tr>
+                        <td colSpan={6} className="py-6 text-center text-neutral-450 italic">
+                          ไม่มีการยืมใช้เครื่องมือในบัญชีขณะนี้
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 4: ROSTER GROUP (Buddy list / Cohort rosters) */}
+        {activeTab === 'roster' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center border-b pb-2">
+              <h3 className="font-sans font-extrabold text-sm text-neutral-900 uppercase">
+                {isStudent ? `ทำเนียบเพื่อนเรียนร่วมรุ่นช่างอากาศยาน (รุ่น ${studentBatch})` : 'ทำเนียบบุคลากรวิชาสอนช่างการบิน'}
+              </h3>
+              
+              {!isStudent && (
+                <div className="flex items-center gap-1">
+                  <span>เลือกรุ่นที่เรียกตรวจ:</span>
+                  <select
+                    id="rosterBatchSelect"
+                    value={rosterBatch}
+                    onChange={(e) => setRosterBatch(e.target.value)}
+                    className="border border-neutral-300 px-1 py-0.5 rounded font-mono font-bold bg-white"
+                  >
+                    {dbBatches.map(b => (
+                      <option key={b} value={b}>รุ่น {b}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {users
+                .filter(u => {
+                  if (isStudent) {
+                    return u.role === 'นักศึกษา' && String(u.id || '').substring(0, 2) === studentBatch;
+                  } else {
+                    return u.role !== 'นักศึกษา' && u.role !== 'Admin';
+                  }
+                })
+                .sort((a, b) => String(a.id || '').localeCompare(String(b.id || ''), undefined, { numeric: true, sensitivity: 'base' }))
+                .map((member) => (
+                  <div key={member.id} className="flex gap-4 p-3 border border-neutral-300 rounded bg-white items-center shadow-xs">
+                    <img src={member.photoUrl} alt="member" className="w-12 h-14 object-cover rounded border" referrerPolicy="no-referrer" />
+                    <div className="flex-1">
+                      <p className="font-sans font-extrabold text-neutral-950">{member.firstName} {member.lastName}</p>
+                      <p className="font-mono text-[10px] text-neutral-500 font-bold uppercase">{member.role} | ID: {member.id}</p>
+                      <p className="text-[10px] text-neutral-400 font-mono mt-0.5">{member.email}</p>
+                    </div>
+                    <button
+                      onClick={() => onViewStudentCard(member)}
+                      className="bg-blue-600 text-white font-bold text-[10px] px-2 py-1 rounded hover:bg-blue-700 cursor-pointer"
+                    >
+                      พิมพ์บัตร
+                    </button>
+                  </div>
+                ))}
+            </div>
+            {users.filter(u => {
+              if (isStudent) {
+                return u.role === 'นักศึกษา' && String(u.id || '').substring(0, 2) === studentBatch;
+              } else {
+                return u.role !== 'นักศึกษา' && u.role !== 'Admin';
+              }
+            }).length === 0 && (
+              <div className="text-center py-10 text-neutral-500 italic">
+                ไม่พบข้อมูลทำเนียบรายชื่อในระบบ ณ ขณะนี้
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 5: MY REQUESTS (เอกสารคำขอของฉัน) */}
+        {activeTab === 'requests' && (
+          <div className="space-y-6 animate-fade-in text-slate-800">
+            <div className="border-b pb-2">
+              <h3 className="font-sans font-extrabold text-sm text-neutral-900 uppercase">
+                เอกสารคำขอและใบอนุมัติใช้งานของฉัน (My Documents & PDF)
+              </h3>
+              <p className="font-sans text-[10px] text-slate-400 mt-0.5">
+                รวมใบคำขอใช้พื้นที่ปฏิบัติการ (TLTC-MO-033) ทั้งหมดของท่าน สามารถแสดงตัวอย่างไฟล์ PDF เพื่อพริ้นท์หรือยื่นตรวจสอบ
+              </p>
+            </div>
+
+            {/* Date selection controls for Bulk printing */}
+            <div className="bg-neutral-50 p-3.5 rounded-lg border border-neutral-200 flex flex-wrap items-end gap-3 justify-between">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex flex-col">
+                  <label className="text-[10px] font-bold text-neutral-600 mb-1">เลือกวันที่เริ่มต้น (From Date)</label>
+                  <input
+                    type="date"
+                    value={docStartDate}
+                    onChange={(e) => setDocStartDate(e.target.value)}
+                    className="bg-white border border-neutral-300 rounded px-2 py-1 text-xs font-mono text-neutral-800 focus:outline-none focus:ring-1 focus:ring-neutral-500"
+                  />
+                </div>
+                <div className="flex flex-col">
+                  <label className="text-[10px] font-bold text-neutral-600 mb-1">ถึงวันที่ (To Date)</label>
+                  <input
+                    type="date"
+                    value={docEndDate}
+                    onChange={(e) => setDocEndDate(e.target.value)}
+                    className="bg-white border border-neutral-300 rounded px-2 py-1 text-xs font-mono text-neutral-800 focus:outline-none focus:ring-1 focus:ring-neutral-500"
+                  />
+                </div>
+                {(docStartDate || docEndDate) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDocStartDate('');
+                      setDocEndDate('');
+                    }}
+                    className="bg-neutral-200 hover:bg-neutral-300 text-neutral-700 font-sans text-[10px] font-bold py-1.5 px-2.5 rounded transition-colors mt-auto cursor-pointer"
+                  >
+                    ล้างค่า (Clear)
+                  </button>
+                )}
+              </div>
+
+              {onViewBulkRequestDocs && roomRequests.filter(req => req.requesterId === currentUser.id).filter(req => {
+                if (!docStartDate && !docEndDate) return true;
+                if (docStartDate && req.date < docStartDate) return false;
+                if (docEndDate && req.date > docEndDate) return false;
+                return true;
+              }).length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const selectedList = roomRequests
+                      .filter(req => req.requesterId === currentUser.id)
+                      .filter(req => {
+                        if (!docStartDate && !docEndDate) return true;
+                        if (docStartDate && req.date < docStartDate) return false;
+                        if (docEndDate && req.date > docEndDate) return false;
+                        return true;
+                      });
+                    onViewBulkRequestDocs(selectedList);
+                  }}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-sans text-xs font-bold py-2 px-3.5 rounded-lg flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                >
+                  <Printer size={13} />
+                  <span>พิมพ์เอกสารตามที่เลือก ({roomRequests.filter(req => req.requesterId === currentUser.id).filter(req => {
+                    if (!docStartDate && !docEndDate) return true;
+                    if (docStartDate && req.date < docStartDate) return false;
+                    if (docEndDate && req.date > docEndDate) return false;
+                    return true;
+                  }).length} ใบ)</span>
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-4">
+              {roomRequests.filter(req => req.requesterId === currentUser.id).filter(req => {
+                if (!docStartDate && !docEndDate) return true;
+                if (docStartDate && req.date < docStartDate) return false;
+                if (docEndDate && req.date > docEndDate) return false;
+                return true;
+              }).length === 0 ? (
+                <div className="text-center py-12 border border-dashed border-neutral-300 rounded-xl bg-neutral-50 p-6 flex flex-col items-center justify-center">
+                  <BookOpen size={28} className="text-neutral-300 mb-2" />
+                  <p className="font-sans text-xs font-bold text-neutral-400">ยังไม่พบประวัติการเขียนใบขอจองใช้พื้นที่ตามตัวกรองที่เลือก</p>
+                  <p className="font-sans text-[10.5px] text-neutral-400 mt-1">ท่านสามารถทำการสร้างใบขออนุมัติใหม่ได้ที่แถบ "ขอใช้พื้นที่ห้องปฏิบัติการ/บันทึกการขอใช้ห้อง"</p>
+                </div>
+              ) : (
+                <div className="overflow-x-auto border border-neutral-200 rounded-lg">
+                  <table className="w-full text-left border-collapse bg-white">
+                    <thead>
+                      <tr className="bg-neutral-50 border-b border-neutral-200 text-[10px] font-bold text-neutral-600 uppercase font-sans">
+                        <th className="py-2.5 px-3">เลขที่เอกสาร / ห้องพื้นที่</th>
+                        <th className="py-2.5 px-3">วันที่จอง</th>
+                        <th className="py-2.5 px-3">เวลากรอบชั่วโมง</th>
+                        <th className="py-2.5 px-3">วัตถุประสงค์</th>
+                        <th className="py-2.5 px-3 text-center">สถานะการอนุมัติ</th>
+                        <th className="py-2.5 px-3 text-right">พิมพ์/เอกสาร PDF</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {roomRequests
+                        .filter(req => req.requesterId === currentUser.id)
+                        .filter(req => {
+                          if (!docStartDate && !docEndDate) return true;
+                          if (docStartDate && req.date < docStartDate) return false;
+                          if (docEndDate && req.date > docEndDate) return false;
+                          return true;
+                        })
+                        .map((req) => {
+                          const docNumber = `TLTC-MO-033-${String(req.id || '').substring(0, 5).toUpperCase()}`;
+                          const isApproved = req.maintenanceApproved === 'Approved';
+                          const isRejected = req.maintenanceApproved === 'Rejected';
+                          
+                          return (
+                            <tr key={req.id} className="border-b border-neutral-100 hover:bg-neutral-50/50 text-[11px] font-sans">
+                              <td className="py-3 px-3">
+                                <span className="font-mono text-[9px] font-extrabold bg-neutral-100 text-neutral-600 px-1.5 py-0.5 rounded border border-neutral-200 block w-fit mb-1">
+                                  {docNumber}
+                                </span>
+                                <span className="font-bold text-neutral-900">{req.room}</span>
+                              </td>
+                              <td className="py-3 px-3 font-mono font-bold text-neutral-500">{req.date}</td>
+                              <td className="py-3 px-3 text-neutral-500">{req.timeRange}</td>
+                              <td className="py-3 px-3 max-w-[150px] truncate" title={req.purpose}>{req.purpose}</td>
+                              <td className="py-3 px-3 text-center">
+                                {isApproved ? (
+                                  <span className="inline-flex items-center gap-1 bg-emerald-50 text-emerald-700 border border-emerald-200 px-2 py-0.5 rounded-full text-[9px] font-bold">
+                                    <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span>
+                                    อนุมัติใช้ห้องแล้ว
+                                  </span>
+                                ) : isRejected ? (
+                                  <span className="inline-flex items-center gap-1 bg-rose-50 text-rose-700 border border-rose-200 px-2 py-0.5 rounded-full text-[9px] font-bold">
+                                    <span className="w-1.5 h-1.5 bg-rose-500 rounded-full"></span>
+                                    ปฏิเสธอนุมัติ
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded-full text-[9px] font-bold">
+                                    <span className="w-1.5 h-1.5 bg-amber-500 rounded-full"></span>
+                                    รอตรวจสอบ (Pending)
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-3 px-3 text-right">
+                                <div className="flex justify-end gap-1.5 flex-wrap">
+                                  <button
+                                    type="button"
+                                    onClick={() => onViewRequestDoc(req)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-[10px] rounded transition-all cursor-pointer active:scale-95 shadow-3xs"
+                                  >
+                                    <Printer size={10} />
+                                    <span>แสดงเอกสาร PDF</span>
+                                  </button>
+                                  {onCancelRoomRequest && (
+                                    <button
+                                      type="button"
+                                      onClick={() => onCancelRoomRequest(req.id)}
+                                      className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] rounded transition-all cursor-pointer active:scale-95 shadow-3xs"
+                                    >
+                                      <span>ยกเลิก</span>
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        </div>
+      </div>
+
+      {showTraceabilityDoc && (
+        <TraceabilityToolsLogDoc 
+          records={borrowRecords.filter(rec => isStudent ? rec.borrowerId === currentUser.id : true)}
+          onClose={() => setShowTraceabilityDoc(false)}
+        />
+      )}
+
+    </div>
+  );
+}
